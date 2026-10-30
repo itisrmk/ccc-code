@@ -1,0 +1,5 @@
+/target
+
+# Traffic dumps contain real prompts, code and possibly secrets.
+/dumps
+*.dump
