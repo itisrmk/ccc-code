@@ -1,5 +1,6 @@
 //! `ccc`: a local-first prompt compiler for Claude Code.
 
+mod bench;
 mod run;
 
 use std::fs::OpenOptions;
@@ -29,6 +30,8 @@ enum Command {
     Run(RunArgs),
     /// Start the proxy and wait; point ANTHROPIC_BASE_URL at it yourself.
     Serve(ServeArgs),
+    /// Replay local transcripts and report token and cost effects. Nothing leaves the machine.
+    Bench(BenchArgs),
 }
 
 #[derive(Debug, Args)]
@@ -72,6 +75,13 @@ struct ServeArgs {
     listen: SocketAddr,
 }
 
+#[derive(Debug, Args)]
+struct BenchArgs {
+    /// Directory of Claude Code transcripts, normally ~/.claude/projects.
+    #[arg(value_name = "DIR")]
+    transcripts: PathBuf,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<ExitCode> {
     match Cli::parse().command {
@@ -83,6 +93,10 @@ async fn main() -> anyhow::Result<ExitCode> {
         Command::Serve(args) => {
             init_logging(args.proxy.log_file.as_deref(), LogDefault::Stderr)?;
             serve(args).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Bench(args) => {
+            bench::run(&args.transcripts)?;
             Ok(ExitCode::SUCCESS)
         }
     }
