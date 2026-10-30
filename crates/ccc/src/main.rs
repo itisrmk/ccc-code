@@ -4,7 +4,8 @@ mod bench;
 mod run;
 
 use std::collections::BTreeSet;
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -14,9 +15,13 @@ use anyhow::Context;
 use ccc_pipeline::{Pipeline, Stage};
 use ccc_proxy::{Proxy, ProxyConfig};
 use ccc_prune::Prune;
+use ccc_redact::{Detector, Redact, Vault};
 use clap::{Args, Parser, Subcommand};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
+
+/// Project redaction rules, relative to the directory `ccc` runs in.
+const DEFAULT_REDACT_RULES: &str = ".ccc/redact-rules";
 
 /// Where requests go when neither `--upstream` nor `ANTHROPIC_BASE_URL` is set.
 const DEFAULT_UPSTREAM: &str = "https://api.anthropic.com";
@@ -55,6 +60,17 @@ struct ProxyArgs {
     /// Don't prune tool output in new conversations. Existing ones keep their settings.
     #[arg(long)]
     no_prune: bool,
+    /// Don't redact secrets in new conversations. Existing ones keep their settings.
+    #[arg(long)]
+    no_redact: bool,
+    /// Extra patterns to redact, one regular expression per line. Lines starting with #
+    /// are ignored. Defaults to .ccc/redact-rules in the current directory, if present.
+    #[arg(long, value_name = "FILE")]
+    redact_rules: Option<PathBuf>,
+    /// Have the API reject any edit to history behind a thinking block. For testing: this
+    /// is already the default for accounts created on or after 2026-08-31.
+    #[arg(long)]
+    enforce_thinking_check: bool,
     /// Where per-conversation state lives. Defaults to ~/.ccc.
     #[arg(long, value_name = "DIR")]
     state_dir: Option<PathBuf>,
@@ -62,16 +78,30 @@ struct ProxyArgs {
 
 impl ProxyArgs {
     fn proxy(&self) -> anyhow::Result<Proxy> {
+        let state_dir = self.state_dir.clone().or_else(default_state_dir);
+        let vault = Arc::new(match &state_dir {
+            Some(dir) => Vault::open(&dir.join("redact.key")).context("opening redaction key")?,
+            None => Vault::ephemeral().context("creating redaction key")?,
+        });
+        let redact = Redact::new(self.detector()?, Arc::clone(&vault));
+        let prune = Prune::new();
+
         let mut disabled_stages = BTreeSet::new();
+        if self.no_redact {
+            disabled_stages.insert(redact.name().to_owned());
+        }
         if self.no_prune {
-            disabled_stages.insert(Prune::new().name().to_owned());
+            disabled_stages.insert(prune.name().to_owned());
         }
         let config = ProxyConfig {
             upstream: self.upstream.clone(),
             dump_dir: self.dump.clone(),
-            pipeline: Pipeline::new(vec![Arc::new(Prune::new())]),
+            // Secrets go first, so nothing later handles or logs a real value.
+            pipeline: Pipeline::new(vec![Arc::new(redact), Arc::new(prune)]),
             disabled_stages,
-            state_dir: self.state_dir.clone().or_else(default_state_dir),
+            state_dir,
+            vault: Some(vault),
+            enforce_thinking_check: self.enforce_thinking_check,
         };
         Proxy::new(config).context("configuring proxy")
     }
@@ -79,6 +109,33 @@ impl ProxyArgs {
 
 fn default_state_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ccc"))
+}
+
+impl ProxyArgs {
+    fn detector(&self) -> anyhow::Result<Detector> {
+        let path = self
+            .redact_rules
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_REDACT_RULES));
+        let rules = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            // A rules file named on the command line has to exist; the default is optional.
+            Err(err) if err.kind() == ErrorKind::NotFound && self.redact_rules.is_none() => {
+                String::new()
+            }
+            Err(err) => {
+                return Err(err).with_context(|| format!("reading {}", path.display()));
+            }
+        };
+        let patterns: Vec<String> = rules
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(str::to_owned)
+            .collect();
+        Detector::with_project_rules(&patterns)
+            .with_context(|| format!("reading rules from {}", path.display()))
+    }
 }
 
 #[derive(Debug, Args)]

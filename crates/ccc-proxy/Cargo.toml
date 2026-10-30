@@ -10,6 +10,7 @@ publish.workspace = true
 axum.workspace = true
 bytes.workspace = true
 ccc-pipeline.workspace = true
+ccc-redact.workspace = true
 ccc-wire.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true

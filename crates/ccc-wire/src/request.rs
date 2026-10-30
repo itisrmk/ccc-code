@@ -102,6 +102,25 @@ impl Request {
         self.fields.get(name).filter(|_| name != MESSAGES)
     }
 
+    /// Replaces the value at `pointer` (RFC 6901) within top-level field `name`.
+    /// Returns whether the target existed.
+    pub fn set_in_field(&mut self, name: &str, pointer: &str, value: Value) -> bool {
+        if name == MESSAGES {
+            return false;
+        }
+        match self
+            .fields
+            .get_mut(name)
+            .and_then(|field| field.pointer_mut(pointer))
+        {
+            Some(target) => {
+                *target = value;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Replaces message `index` entirely. Returns whether it existed.
     pub fn set_message(&mut self, index: usize, message: Arc<Value>) -> bool {
         match self.messages.get_mut(index) {
@@ -200,6 +219,17 @@ mod tests {
         assert_eq!(original.messages()[1]["content"], "old");
         assert_eq!(edited.messages()[1]["content"], "new");
         assert!(Arc::ptr_eq(&original.messages()[0], &edited.messages()[0]));
+    }
+
+    #[test]
+    fn set_in_field_edits_fields_but_never_messages() {
+        let mut request =
+            Request::parse(br#"{"system":[{"text":"a"}],"messages":[{"role":"user"}]}"#).unwrap();
+        assert!(request.set_in_field("system", "/0/text", json!("b")));
+        assert_eq!(request.field("system").unwrap()[0]["text"], "b");
+        assert!(!request.set_in_field("messages", "", json!([])));
+        assert!(!request.set_in_field("absent", "", json!(1)));
+        assert_eq!(request.messages().len(), 1);
     }
 
     #[test]

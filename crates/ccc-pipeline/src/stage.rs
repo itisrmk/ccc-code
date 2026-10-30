@@ -6,12 +6,21 @@ use std::time::{Duration, Instant};
 use ccc_wire::Request;
 use serde_json::Value;
 
-/// One replacement inside one message.
+/// What an [`Edit`] changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// The message at this index.
+    Message(usize),
+    /// The top-level `system` prompt.
+    System,
+}
+
+/// One replacement inside one message or the system prompt.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Edit {
-    /// Index of the message to change.
-    pub message: usize,
-    /// RFC 6901 pointer to the value within that message.
+    /// What to change.
+    pub target: Target,
+    /// RFC 6901 pointer to the value within the target.
     pub pointer: String,
     /// The new value.
     pub value: Value,
@@ -130,6 +139,14 @@ impl Pipeline {
     #[must_use]
     pub fn new(stages: Vec<Arc<dyn Stage>>) -> Self {
         Self { stages }
+    }
+
+    /// Whether any of the named stages refuses to let requests through unexamined.
+    #[must_use]
+    pub fn requires_inspection(&self, enabled: &BTreeSet<String>) -> bool {
+        self.stages
+            .iter()
+            .any(|stage| enabled.contains(stage.name()) && stage.on_failure() == OnFailure::Block)
     }
 
     /// Names of all stages, in order.
@@ -275,19 +292,21 @@ fn apply(
 ) -> Vec<Edit> {
     let mut applied = Vec::with_capacity(edits.len());
     for edit in edits {
-        if edit.message < context.protected_before {
-            tracing::error!(
-                stage = stage.name(),
-                message = edit.message,
-                "refused edit to protected history"
-            );
+        if is_protected(edit.target, context) {
+            tracing::error!(stage = stage.name(), target = ?edit.target, "refused edit to protected history");
             continue;
         }
         if targets_thinking(request, &edit) {
             tracing::error!(stage = stage.name(), pointer = %edit.pointer, "refused edit to a signed thinking block");
             continue;
         }
-        if request.set_in_message(edit.message, &edit.pointer, edit.value.clone()) {
+        let found = match edit.target {
+            Target::Message(index) => {
+                request.set_in_message(index, &edit.pointer, edit.value.clone())
+            }
+            Target::System => request.set_in_field("system", &edit.pointer, edit.value.clone()),
+        };
+        if found {
             applied.push(edit);
         } else {
             tracing::warn!(stage = stage.name(), pointer = %edit.pointer, "edit target not found");
@@ -296,18 +315,29 @@ fn apply(
     applied
 }
 
+/// The system prompt comes before all history, so it is protected whenever any history is.
+fn is_protected(target: Target, context: &Context) -> bool {
+    match target {
+        Target::Message(index) => index < context.protected_before,
+        Target::System => context.protected_before > 0,
+    }
+}
+
 /// Whether `edit` lands in or on a `thinking` or `redacted_thinking` block.
 fn targets_thinking(request: &Request, edit: &Edit) -> bool {
-    let Some(message) = request.messages().get(edit.message) else {
+    let Target::Message(index) = edit.target else {
+        return false;
+    };
+    let Some(message) = request.messages().get(index) else {
         return false;
     };
     // A block pointer is /content/<n>, optionally followed by a path within the block.
     let mut segments = edit.pointer.split('/').skip(1);
-    let (Some("content"), Some(index)) = (segments.next(), segments.next()) else {
+    let (Some("content"), Some(block)) = (segments.next(), segments.next()) else {
         return false;
     };
     message
-        .pointer(&format!("/content/{index}/type"))
+        .pointer(&format!("/content/{block}/type"))
         .and_then(Value::as_str)
         .is_some_and(|kind| matches!(kind, "thinking" | "redacted_thinking"))
 }
@@ -360,7 +390,7 @@ mod tests {
 
     fn content_edit(message: usize, text: &str) -> Edit {
         Edit {
-            message,
+            target: Target::Message(message),
             pointer: "/content".to_owned(),
             value: json!(text),
             rule: "test",
@@ -472,7 +502,7 @@ mod tests {
     #[test]
     fn refuses_edits_to_thinking_blocks_at_any_depth() {
         let edits = ["/content/0", "/content/0/signature"].map(|pointer| Edit {
-            message: 1,
+            target: Target::Message(1),
             pointer: pointer.to_owned(),
             value: json!("x"),
             rule: "test",
@@ -483,6 +513,29 @@ mod tests {
             Behavior::Edit(edits.to_vec()),
         )]);
         let original = request();
+        let compiled = pipeline.compile_offline(&original, &context).unwrap();
+        assert_eq!(compiled.request, original);
+    }
+
+    #[test]
+    fn the_system_prompt_is_editable_only_without_protected_history() {
+        let edit = Edit {
+            target: Target::System,
+            pointer: String::new(),
+            value: json!("clean"),
+            rule: "test",
+        };
+        let original = Request::parse(br#"{"system":"secret","messages":[]}"#).unwrap();
+        let (pipeline, mut context) = pipeline(vec![fake(
+            "s",
+            OnFailure::PassThrough,
+            Behavior::Edit(vec![edit]),
+        )]);
+
+        let compiled = pipeline.compile_offline(&original, &context).unwrap();
+        assert_eq!(compiled.request.field("system"), Some(&json!("clean")));
+
+        context.protected_before = 1;
         let compiled = pipeline.compile_offline(&original, &context).unwrap();
         assert_eq!(compiled.request, original);
     }

@@ -1,16 +1,17 @@
 //! The forwarding path: one handler for every method and route.
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Request, State as AxumState};
-use axum::http::header::{self, HeaderMap, HeaderName};
+use axum::http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use axum::http::request::Parts;
 use axum::http::{Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use ccc_pipeline::{Compiled, Pipeline, StageOutcome};
-use futures_util::TryStreamExt;
+use ccc_redact::{ResponseRehydrator, Vault, rehydrate_json};
+use futures_util::{Stream, StreamExt, TryStreamExt};
 
 use crate::Stats;
 use crate::conversations::Conversations;
@@ -22,6 +23,13 @@ const MAX_REQUEST_BYTES: usize = 1 << 30;
 
 /// Paths whose bodies are Messages API requests.
 const COMPILED_PATHS: [&str; 2] = ["/v1/messages", "/v1/messages/count_tokens"];
+
+/// The name of the stage that puts placeholders into requests.
+const REDACT_STAGE: &str = "redact";
+
+const ANTHROPIC_BETA: &str = "anthropic-beta";
+/// The beta that lets a request set `thinking.block_binding`.
+const THINKING_CHECK_BETA: &str = "thinking-binding-controls-2026-08-01";
 
 /// The header Claude Code uses to name its session.
 const SESSION_HEADER: &str = "x-claude-code-session-id";
@@ -44,6 +52,10 @@ pub(crate) struct State {
     pub(crate) dumper: Option<Dumper>,
     pub(crate) pipeline: Pipeline,
     pub(crate) conversations: Conversations,
+    /// A stage forbids sending what the compiler can't read, so unreadable bodies stop here.
+    pub(crate) must_inspect: bool,
+    pub(crate) vault: Option<Arc<Vault>>,
+    pub(crate) enforce_thinking_check: bool,
     pub(crate) stats: Arc<Stats>,
 }
 
@@ -61,20 +73,33 @@ pub(crate) async fn handle(AxumState(state): AxumState<Arc<State>>, request: Req
         dumper.record_request(parts.method.as_str(), &parts.uri, &parts.headers, &body)
     });
 
-    let body = if is_compiled_request(&parts) {
+    let compiled_request = is_compiled_request(&parts);
+    let (body, rehydrate_from) = if compiled_request {
         match compile_body(&state, &parts, body, exchange.as_ref()).await {
-            Ok(body) => body,
+            Ok(compiled) => compiled,
             Err(response) => return *response,
         }
     } else {
-        body
+        (body, None)
     };
+
+    let mut request_headers = forwardable_headers(&parts.headers);
+    if compiled_request && state.enforce_thinking_check {
+        add_beta(&mut request_headers, THINKING_CHECK_BETA);
+    }
+    if rehydrate_from.is_some() {
+        // Compressed event streams can't be rewritten on the way through.
+        request_headers.insert(
+            header::ACCEPT_ENCODING,
+            HeaderValue::from_static("identity"),
+        );
+    }
 
     let upstream_url = upstream_url(&state.upstream, &parts.uri);
     let upstream_request = state
         .client
         .request(parts.method, &upstream_url)
-        .headers(forwardable_headers(&parts.headers))
+        .headers(request_headers)
         .body(body)
         .send()
         .await;
@@ -99,32 +124,89 @@ pub(crate) async fn handle(AxumState(state): AxumState<Arc<State>>, request: Req
         }
     });
 
-    let mut response = Response::new(Body::from_stream(stream));
+    let mut response = Response::new(rehydrated_body(stream, &headers, rehydrate_from).await);
     *response.status_mut() = status;
     *response.headers_mut() = headers;
     response
+}
+
+/// Wraps a response body so placeholders become real values before Claude Code sees them.
+async fn rehydrated_body<S>(stream: S, headers: &HeaderMap, vault: Option<Arc<Vault>>) -> Body
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+{
+    let Some(vault) = vault else {
+        return Body::from_stream(stream);
+    };
+    if headers.contains_key(header::CONTENT_ENCODING) {
+        tracing::warn!("upstream compressed a response, so placeholders can't be restored");
+        return Body::from_stream(stream);
+    }
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if content_type.starts_with("text/event-stream") {
+        let rehydrator = Arc::new(Mutex::new(ResponseRehydrator::new(vault)));
+        let finishing = Arc::clone(&rehydrator);
+        let events = stream.map_ok(move |chunk| {
+            Bytes::from(rehydrator.lock().expect("lock poisoned").push(&chunk))
+        });
+        let tail = futures_util::stream::once(async move {
+            Ok(Bytes::from(
+                finishing.lock().expect("lock poisoned").finish(),
+            ))
+        });
+        return Body::from_stream(events.chain(tail));
+    }
+    if content_type.starts_with("application/json") {
+        let collected: Result<Vec<Bytes>, reqwest::Error> = stream.try_collect().await;
+        return match collected {
+            Ok(chunks) => {
+                let whole = chunks.concat();
+                Body::from(rehydrate_json(&whole, &vault).unwrap_or(whole))
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "upstream response failed partway");
+                Body::from(err.to_string())
+            }
+        };
+    }
+    Body::from_stream(stream)
 }
 
 fn is_compiled_request(parts: &Parts) -> bool {
     parts.method == Method::POST && COMPILED_PATHS.contains(&parts.uri.path())
 }
 
-/// Runs the pipeline over a request body. Forwards the original bytes unless a stage
-/// actually changed something, and also if the body isn't one the compiler understands.
+/// Runs the pipeline over a request body, returning the bytes to send and the vault to
+/// restore placeholders from, if this conversation is being redacted. Forwards the original
+/// bytes unless a stage actually changed something.
 async fn compile_body(
     state: &State,
     parts: &Parts,
     body: Bytes,
     exchange: Option<&Exchange>,
-) -> Result<Bytes, Box<Response>> {
+) -> Result<(Bytes, Option<Arc<Vault>>), Box<Response>> {
+    let refuse_or_forward = |body: Bytes, why: &str| {
+        if state.must_inspect {
+            tracing::error!(why, "refusing to send a request the compiler can't read");
+            state.stats.blocked.fetch_add(1, Ordering::Relaxed);
+            return Err(Box::new(error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("ccc blocked this request: {why}"),
+            )));
+        }
+        Ok((body, None))
+    };
     if parts.headers.contains_key(header::CONTENT_ENCODING) {
-        return Ok(body);
+        return refuse_or_forward(body, "its body is compressed");
     }
     let parsed = match ccc_wire::Request::parse(&body) {
         Ok(parsed) => parsed,
         Err(err) => {
-            tracing::debug!(error = %err, "passing through a body the compiler can't read");
-            return Ok(body);
+            tracing::debug!(error = %err, "body isn't a messages request");
+            return refuse_or_forward(body, "its body isn't a readable messages request");
         }
     };
     let session = parts
@@ -132,6 +214,10 @@ async fn compile_body(
         .get(SESSION_HEADER)
         .and_then(|value| value.to_str().ok());
     let context = state.conversations.context_for(session, &parsed);
+    let rehydrate_from = state
+        .vault
+        .clone()
+        .filter(|_| context.enabled.contains(REDACT_STAGE));
 
     let compiled = match state.pipeline.compile(parsed, context).await {
         Ok(compiled) => compiled,
@@ -146,16 +232,52 @@ async fn compile_body(
     };
     record_trace(state, &compiled, exchange);
 
-    if !compiled.changed() {
+    let changed = compiled.changed();
+    let mut request = compiled.request;
+    let enforcing = state.enforce_thinking_check && enforce_thinking_check(&mut request);
+    if !changed && !enforcing {
         state.stats.record(body.len(), body.len());
-        return Ok(body);
+        return Ok((body, rehydrate_from));
     }
-    let rewritten = Bytes::from(compiled.request.to_bytes());
+    let rewritten = Bytes::from(request.to_bytes());
     state.stats.record(body.len(), rewritten.len());
     if let Some(exchange) = exchange {
         exchange.record_compiled_body(&rewritten);
     }
-    Ok(rewritten)
+    Ok((rewritten, rehydrate_from))
+}
+
+/// Opts a request into the strict history check. Returns whether the request changed;
+/// without a `thinking` setting there's nothing to attach the option to.
+fn enforce_thinking_check(request: &mut ccc_wire::Request) -> bool {
+    let Some(mut thinking) = request.field("thinking").cloned() else {
+        return false;
+    };
+    let Some(settings) = thinking.as_object_mut() else {
+        return false;
+    };
+    settings.insert(
+        "block_binding".to_owned(),
+        serde_json::json!({ "prefix_mismatch_behavior": "error" }),
+    );
+    request.set_in_field("thinking", "", thinking)
+}
+
+/// Adds a value to the comma-separated `anthropic-beta` header.
+fn add_beta(headers: &mut HeaderMap, beta: &'static str) {
+    let combined = match headers
+        .get(ANTHROPIC_BETA)
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(existing) if !existing.is_empty() => format!("{existing},{beta}"),
+        _ => beta.to_owned(),
+    };
+    match HeaderValue::from_str(&combined) {
+        Ok(value) => {
+            headers.insert(ANTHROPIC_BETA, value);
+        }
+        Err(err) => tracing::warn!(error = %err, "could not add beta header"),
+    }
 }
 
 fn record_trace(state: &State, compiled: &Compiled, exchange: Option<&Exchange>) {
@@ -171,7 +293,7 @@ fn record_trace(state: &State, compiled: &Compiled, exchange: Option<&Exchange>)
                     tracing::debug!(
                         stage = entry.stage,
                         rule = edit.rule,
-                        message = edit.message,
+                        target = ?edit.target,
                         pointer = %edit.pointer,
                         "edit"
                     );
@@ -234,7 +356,31 @@ fn error_response(status: StatusCode, message: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::HeaderValue;
+
+    #[test]
+    fn add_beta_appends_to_an_existing_list() {
+        let mut headers = HeaderMap::new();
+        add_beta(&mut headers, "one");
+        assert_eq!(headers[ANTHROPIC_BETA], "one");
+        add_beta(&mut headers, "two");
+        assert_eq!(headers[ANTHROPIC_BETA], "one,two");
+    }
+
+    #[test]
+    fn enforcing_adds_to_thinking_settings_and_skips_requests_without_them() {
+        let mut with =
+            ccc_wire::Request::parse(br#"{"thinking":{"type":"adaptive"},"messages":[]}"#).unwrap();
+        assert!(enforce_thinking_check(&mut with));
+        let settings = with.field("thinking").unwrap();
+        assert_eq!(settings["type"], "adaptive");
+        assert_eq!(
+            settings["block_binding"]["prefix_mismatch_behavior"],
+            "error"
+        );
+
+        let mut without = ccc_wire::Request::parse(br#"{"messages":[]}"#).unwrap();
+        assert!(!enforce_thinking_check(&mut without));
+    }
 
     #[test]
     fn upstream_url_keeps_path_and_query() {

@@ -16,8 +16,9 @@ use axum::body::{Bytes, to_bytes};
 use axum::extract::{Request as AxumRequest, State};
 use axum::http::StatusCode;
 use axum::routing::any;
-use ccc_pipeline::{Context, Edit, OnFailure, Pipeline, Stage, StageError};
+use ccc_pipeline::{Context, Edit, OnFailure, Pipeline, Stage, StageError, Target};
 use ccc_proxy::{Proxy, ProxyConfig};
+use ccc_redact::{Detector, Redact, Vault};
 use ccc_wire::Request;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -67,7 +68,7 @@ impl Stage for Shrink {
             .skip(context.protected_before)
             .filter(|(_, message)| message["content"] == "shrink")
             .map(|(message, _)| Edit {
-                message,
+                target: Target::Message(message),
                 pointer: "/content".to_owned(),
                 value: json!("small"),
                 rule: "test",
@@ -102,6 +103,7 @@ struct Setup {
     pipeline: Pipeline,
     disabled: BTreeSet<String>,
     state_dir: Option<PathBuf>,
+    vault: Option<Arc<Vault>>,
 }
 
 impl Default for Setup {
@@ -110,6 +112,7 @@ impl Default for Setup {
             pipeline: Pipeline::new(vec![Arc::new(Shrink)]),
             disabled: BTreeSet::new(),
             state_dir: None,
+            vault: None,
         }
     }
 }
@@ -121,6 +124,8 @@ async fn spawn_proxy(upstream: SocketAddr, setup: Setup) -> SocketAddr {
         pipeline: setup.pipeline,
         disabled_stages: setup.disabled,
         state_dir: setup.state_dir,
+        vault: setup.vault,
+        enforce_thinking_check: false,
     })
     .unwrap();
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -299,5 +304,128 @@ async fn a_blocking_failure_never_reaches_upstream() {
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let error: Value = response.json().await.unwrap();
     assert_eq!(error["type"], "error");
+    assert!(bodies.lock().unwrap().is_empty());
+}
+
+fn fake_key() -> String {
+    format!("{}{}", "sk-ant-", "api03-abcdefghijklmnopqrstuvwxyz012345")
+}
+
+/// A fake model: repeats whatever placeholder it finds in the request, streamed so that
+/// the placeholder straddles two events, or as plain JSON for non-streaming requests.
+async fn echo_placeholder(
+    State(bodies): State<Bodies>,
+    request: AxumRequest,
+) -> axum::response::Response {
+    let accept_encoding = request
+        .headers()
+        .get("accept-encoding")
+        .map(|value| value.to_str().unwrap().to_owned());
+    let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+    bodies
+        .lock()
+        .unwrap()
+        .push((accept_encoding.unwrap_or_default(), body.clone()));
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    let start = text
+        .find("<SECRET_")
+        .expect("the request should carry a placeholder");
+    let placeholder = &text[start..start + 19];
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    if parsed["stream"] == true {
+        let (left, right) = placeholder.split_at(9);
+        let delta = |value: &str| {
+            let data = json!({ "type": "content_block_delta", "index": 0,
+                "delta": { "type": "text_delta", "text": value } });
+            format!("event: content_block_delta\ndata: {data}\n\n")
+        };
+        let stop =
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n";
+        axum::response::Response::builder()
+            .header("content-type", "text/event-stream")
+            .body(axum::body::Body::from(format!(
+                "{}{}{stop}",
+                delta(left),
+                delta(right)
+            )))
+            .unwrap()
+    } else {
+        let answer = json!({ "content": [{ "type": "text", "text": placeholder }] });
+        axum::response::Response::builder()
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(answer.to_string()))
+            .unwrap()
+    }
+}
+
+async fn spawn_redacting_proxy() -> (SocketAddr, Bodies) {
+    let bodies = Bodies::default();
+    let app = Router::new()
+        .fallback(any(echo_placeholder))
+        .with_state(Arc::clone(&bodies));
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let vault = Arc::new(Vault::ephemeral().unwrap());
+    let stage = Redact::new(Detector::builtin(), Arc::clone(&vault));
+    let proxy = spawn_proxy(
+        upstream,
+        Setup {
+            pipeline: Pipeline::new(vec![Arc::new(stage)]),
+            vault: Some(vault),
+            ..Setup::default()
+        },
+    )
+    .await;
+    (proxy, bodies)
+}
+
+#[tokio::test]
+async fn a_secret_never_reaches_upstream_and_comes_back_real_when_streaming() {
+    let (proxy, bodies) = spawn_redacting_proxy().await;
+    let key = fake_key();
+    let body = json!({ "stream": true, "messages": [
+        { "role": "user", "content": format!("use {key}") },
+    ] });
+
+    let response = post(proxy, "/v1/messages", &body.to_string()).await;
+    let text = response.text().await.unwrap();
+
+    assert!(text.contains(&key), "{text}");
+    assert!(!text.contains("<SECRET_"), "{text}");
+    let (accept_encoding, sent) = bodies.lock().unwrap()[0].clone();
+    assert!(!String::from_utf8_lossy(&sent).contains(&key));
+    assert_eq!(accept_encoding, "identity");
+}
+
+#[tokio::test]
+async fn a_secret_comes_back_real_in_a_non_streaming_response() {
+    let (proxy, _bodies) = spawn_redacting_proxy().await;
+    let key = fake_key();
+    let body = json!({ "messages": [{ "role": "user", "content": format!("use {key}") }] });
+
+    let response = post(proxy, "/v1/messages", &body.to_string()).await;
+    let answer: Value = response.json().await.unwrap();
+
+    assert_eq!(answer["content"][0]["text"], key);
+}
+
+#[tokio::test]
+async fn with_redaction_on_unreadable_bodies_never_reach_upstream() {
+    let (proxy, bodies) = spawn_redacting_proxy().await;
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+    let unparseable = post(proxy, "/v1/messages", "not json").await;
+    assert_eq!(unparseable.status(), StatusCode::BAD_REQUEST);
+
+    let compressed = client
+        .post(format!("http://{proxy}/v1/messages"))
+        .header("content-encoding", "gzip")
+        .body(vec![0x1f, 0x8b])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(compressed.status(), StatusCode::BAD_REQUEST);
     assert!(bodies.lock().unwrap().is_empty());
 }

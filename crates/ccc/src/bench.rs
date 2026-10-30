@@ -1,15 +1,17 @@
 //! `ccc bench`: replay local transcripts and print the results.
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use ccc_bench::{Scenario, append_only_violations, fidelity};
-use ccc_pipeline::{Context, Pipeline};
+use ccc_pipeline::{Context, Pipeline, StageOutcome};
 use ccc_prune::{Limits, Prune};
+use ccc_redact::{Detector, Redact, Vault};
 use ccc_wire::{Request, text_of_tool_result};
 use serde_json::Value;
 
@@ -79,6 +81,81 @@ pub(crate) fn run(transcripts: &Path) -> anyhow::Result<()> {
 
     let report = ccc_bench::replay(&sessions, summary, &scenarios);
     writeln!(out, "{report}").context("writing report")?;
+
+    writeln!(out, "\nRedaction on real transcripts").context("writing report")?;
+    let vault = Arc::new(Vault::ephemeral().context("creating redaction key")?);
+    let redacting = Pipeline::new(vec![
+        Arc::new(Redact::new(Detector::builtin(), vault)),
+        Arc::new(Prune::new()),
+    ]);
+    let redact_context = Context {
+        protected_before: 0,
+        enabled: BTreeSet::from(["redact".to_owned(), "prune".to_owned()]),
+    };
+    let compile_all = |request: &Request| {
+        redacting
+            .compile_offline(request, &redact_context)
+            .expect("transcript requests are readable")
+            .request
+    };
+    let mut by_rule: BTreeMap<&str, usize> = BTreeMap::new();
+    for session in &sessions {
+        let Some(last) = session.calls.last() else {
+            continue;
+        };
+        let compiled = redacting
+            .compile_offline(&last.request, &redact_context)
+            .expect("transcript requests are readable");
+        for entry in compiled
+            .trace
+            .iter()
+            .filter(|entry| entry.stage == "redact")
+        {
+            if let StageOutcome::Applied(edits) = &entry.outcome {
+                for edit in edits {
+                    *by_rule.entry(edit.rule).or_default() += 1;
+                }
+            }
+        }
+    }
+    writeln!(
+        out,
+        "  edits by rule, final request of each session: {by_rule:?}"
+    )
+    .context("writing report")?;
+    writeln!(
+        out,
+        "  append-only violations with redact + prune: {}",
+        append_only_violations(&sessions, &compile_all)
+    )
+    .context("writing report")?;
+
+    let mut elapsed: BTreeMap<&str, Vec<Duration>> = BTreeMap::new();
+    for call in sessions.iter().flat_map(|session| &session.calls) {
+        let compiled = redacting
+            .compile_offline(&call.request, &redact_context)
+            .expect("transcript requests are readable");
+        for entry in compiled.trace {
+            elapsed.entry(entry.stage).or_default().push(entry.elapsed);
+        }
+    }
+    writeln!(
+        out,
+        "\nStage latency per call, memo warm, image data excluded"
+    )
+    .context("writing report")?;
+    for (stage, mut samples) in elapsed {
+        samples.sort();
+        let at = |fraction: f64| samples[(samples.len() - 1) * (fraction * 100.0) as usize / 100];
+        writeln!(
+            out,
+            "  {stage:<8} p50 {:?}  p95 {:?}  max {:?}",
+            at(0.5),
+            at(0.95),
+            at(1.0)
+        )
+        .context("writing report")?;
+    }
 
     writeln!(out, "\nSafety checks").context("writing report")?;
     for (name, compiler) in &compilers {

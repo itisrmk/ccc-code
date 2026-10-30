@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
 use ccc_pipeline::Pipeline;
+use ccc_redact::Vault;
 use tokio::net::TcpListener;
 
 use crate::conversations::Conversations;
@@ -67,6 +68,12 @@ pub struct ProxyConfig {
     /// Directory for per-conversation state. `None` keeps it in memory, in which case a
     /// restart in the middle of a conversation can invalidate its thinking blocks.
     pub state_dir: Option<PathBuf>,
+    /// Resolves placeholders in responses. Must be the vault the Redact stage records in.
+    pub vault: Option<Arc<Vault>>,
+    /// Asks the API to reject any request that edits history behind a thinking block, as
+    /// it already does for accounts created on or after 2026-08-31. For testing the
+    /// compiler from an older account, where such an edit would otherwise go unreported.
+    pub enforce_thinking_check: bool,
 }
 
 /// Running totals for a proxy, readable while it serves.
@@ -132,6 +139,7 @@ impl Proxy {
             .filter(|name| !config.disabled_stages.contains(*name))
             .map(str::to_owned)
             .collect();
+        let must_inspect = config.pipeline.requires_inspection(&enabled_for_new);
         let conversations = Conversations::new(
             config.state_dir.map(|dir| dir.join("conversations")),
             enabled_for_new,
@@ -143,6 +151,9 @@ impl Proxy {
                 dumper,
                 pipeline: config.pipeline,
                 conversations,
+                must_inspect,
+                vault: config.vault,
+                enforce_thinking_check: config.enforce_thinking_check,
                 stats: Arc::default(),
             }),
         })

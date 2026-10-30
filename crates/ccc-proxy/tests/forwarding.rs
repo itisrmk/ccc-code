@@ -70,6 +70,8 @@ async fn spawn_proxy(upstream: String, dump_dir: Option<PathBuf>) -> RunningProx
         pipeline: Pipeline::default(),
         disabled_stages: BTreeSet::new(),
         state_dir: None,
+        vault: None,
+        enforce_thinking_check: false,
     })
     .unwrap();
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();

@@ -41,16 +41,23 @@ pub(super) fn trim(limits: &Limits, text: &str) -> Option<String> {
     keep.extend(0..HEAD_LINES.min(lines.len()));
     keep.extend(lines.len().saturating_sub(TAIL_LINES)..lines.len());
 
-    let signal_lines = lines
+    keep.extend(signal_lines(&lines));
+    Some(render(&lines, &keep))
+}
+
+/// The lines reporting failures, with the lines around them that often explain them.
+pub(super) fn signal_lines(lines: &[&str]) -> BTreeSet<usize> {
+    let mut keep = BTreeSet::new();
+    let signals = lines
         .iter()
         .enumerate()
         .filter(|(_, line)| SIGNAL.is_match(line) && !THIRD_PARTY_FRAME.is_match(line))
         .map(|(index, _)| index);
-    for index in signal_lines.take(MAX_SIGNAL_LINES) {
+    for index in signals.take(MAX_SIGNAL_LINES) {
         let end = (index + CONTEXT_LINES + 1).min(lines.len());
         keep.extend(index.saturating_sub(CONTEXT_LINES)..end);
     }
-    Some(render(&lines, &keep))
+    keep
 }
 
 /// Renders the kept lines in order, marking each gap with what was dropped.

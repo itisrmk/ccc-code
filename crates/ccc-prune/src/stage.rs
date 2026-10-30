@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use ccc_pipeline::{Context, Edit, OnFailure, Stage, StageError};
+use ccc_pipeline::{Context, Edit, OnFailure, Stage, StageError, Target};
 use ccc_wire::{Request, text_of_tool_result};
 use serde_json::{Value, json};
 
@@ -69,6 +69,12 @@ impl Prune {
     }
 }
 
+fn hash_of(text: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
 impl Stage for Prune {
     fn name(&self) -> &'static str {
         "prune"
@@ -85,7 +91,7 @@ impl Stage for Prune {
     fn plan(&self, request: &Request, context: &Context) -> Result<Vec<Edit>, StageError> {
         let mut edits = Vec::new();
         let mut calls: HashMap<&str, (&str, Option<&Value>)> = HashMap::new();
-        let mut first_seen: HashMap<u64, &str> = HashMap::new();
+        let mut first_sent: HashMap<u64, &str> = HashMap::new();
 
         for (index, message) in request.messages().iter().enumerate() {
             let Some(blocks) = message.get("content").and_then(Value::as_array) else {
@@ -108,32 +114,37 @@ impl Stage for Prune {
                         let Some(text) = block.get("content").and_then(text_of_tool_result) else {
                             continue;
                         };
-                        let text_hash = {
-                            let mut hasher = DefaultHasher::new();
-                            text.as_ref().hash(&mut hasher);
-                            hasher.finish()
+                        let text_hash = hash_of(&text);
+                        // Protected results went out whole; anything newer may be trimmed.
+                        let trimmed = if index < context.protected_before {
+                            None
+                        } else {
+                            let (tool, input) = calls.get(id).copied().unwrap_or(("", None));
+                            self.trim(id, tool, input, &text, text_hash)
                         };
-                        let earlier = first_seen.get(&text_hash).copied();
-                        first_seen.entry(text_hash).or_insert(id);
+
+                        // Compare what was actually sent, so a stub only ever points at
+                        // something that really holds the same content.
+                        let sent_hash = trimmed.as_ref().map_or(text_hash, |t| hash_of(&t.text));
+                        let sent_len = trimmed.as_ref().map_or(text.len(), |t| t.text.len());
+                        let earlier = first_sent.get(&sent_hash).copied();
+                        first_sent.entry(sent_hash).or_insert(id);
                         if index < context.protected_before {
                             continue;
                         }
+
                         let replacement = match earlier {
-                            Some(earlier) if text.len() >= MIN_DUPLICATE_CHARS => Some((
+                            Some(earlier) if sent_len >= MIN_DUPLICATE_CHARS => Some((
                                 "duplicate",
                                 format!(
                                     "[ccc: identical to the result of tool call {earlier} above]"
                                 ),
                             )),
-                            _ => {
-                                let (tool, input) = calls.get(id).copied().unwrap_or(("", None));
-                                self.trim(id, tool, input, &text, text_hash)
-                                    .map(|trimmed| (trimmed.rule, trimmed.text))
-                            }
+                            _ => trimmed.map(|trimmed| (trimmed.rule, trimmed.text)),
                         };
                         if let Some((rule, replacement)) = replacement {
                             edits.push(Edit {
-                                message: index,
+                                target: Target::Message(index),
                                 pointer: format!("/content/{position}/content"),
                                 value: json!(replacement),
                                 rule,
@@ -206,12 +217,45 @@ mod tests {
         ];
         let edits = Prune::new().plan(&request(&messages), &context()).unwrap();
         assert_eq!(edits.len(), 1);
-        assert_eq!(edits[0].message, 3);
+        assert_eq!(edits[0].target, Target::Message(3));
         assert_eq!(edits[0].rule, "duplicate");
         assert!(
             edits[0].value.as_str().unwrap().contains(" a "),
             "{edits:?}"
         );
+    }
+
+    /// Found by a live run: `make test` matched an earlier script's output exactly, so it
+    /// became a stub pointing at a copy that had already lost the failure line.
+    #[test]
+    fn a_stub_never_points_at_a_copy_that_lost_content() {
+        let mut lines: Vec<String> = (0..600).map(|i| format!("test case_{i} ... ok")).collect();
+        lines[300] = "plain line that no rule treats as a failure".to_owned();
+        let output = lines.join("\n");
+        let messages = [
+            bash("a", "python3 run_tests.py"),
+            tool_result("a", &output),
+            bash("b", "rg case"),
+            tool_result("b", &output),
+        ];
+        let edits = Prune::new().plan(&request(&messages), &context()).unwrap();
+        assert_eq!(edits.len(), 2, "{edits:?}");
+        assert_eq!(edits[0].rule, "generic");
+        assert_eq!(edits[1].rule, "listing", "kept its own view, not a stub");
+    }
+
+    #[test]
+    fn identical_output_trimmed_the_same_way_still_dedupes() {
+        let log = noisy_test_log();
+        let messages = [
+            bash("a", "cargo test"),
+            tool_result("a", &log),
+            bash("b", "cargo test"),
+            tool_result("b", &log),
+        ];
+        let edits = Prune::new().plan(&request(&messages), &context()).unwrap();
+        assert_eq!(edits[0].rule, "log");
+        assert_eq!(edits[1].rule, "duplicate");
     }
 
     #[test]
@@ -270,7 +314,7 @@ mod tests {
         protected.protected_before = 4;
         let edits = Prune::new().plan(&request(&messages), &protected).unwrap();
         assert_eq!(edits.len(), 1, "{edits:?}");
-        assert_eq!(edits[0].message, 5);
+        assert_eq!(edits[0].target, Target::Message(5));
         assert_eq!(edits[0].rule, "duplicate");
     }
 

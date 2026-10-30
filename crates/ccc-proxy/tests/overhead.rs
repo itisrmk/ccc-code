@@ -57,6 +57,8 @@ async fn added_latency_stays_within_budget() {
         pipeline: Pipeline::default(),
         disabled_stages: BTreeSet::new(),
         state_dir: None,
+        vault: None,
+        enforce_thinking_check: false,
     })
     .unwrap();
     let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();

@@ -119,7 +119,7 @@ impl Exchange {
                             .iter()
                             .map(|edit| {
                                 serde_json::json!({
-                                    "message": edit.message,
+                                    "target": format!("{:?}", edit.target),
                                     "pointer": edit.pointer,
                                     "rule": edit.rule,
                                 })

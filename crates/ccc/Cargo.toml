@@ -16,6 +16,7 @@ ccc-bench.workspace = true
 ccc-pipeline.workspace = true
 ccc-proxy.workspace = true
 ccc-prune.workspace = true
+ccc-redact.workspace = true
 ccc-wire.workspace = true
 clap.workspace = true
 serde_json.workspace = true

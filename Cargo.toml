@@ -13,6 +13,7 @@ ccc-bench = { path = "crates/ccc-bench" }
 ccc-pipeline = { path = "crates/ccc-pipeline" }
 ccc-proxy = { path = "crates/ccc-proxy" }
 ccc-prune = { path = "crates/ccc-prune" }
+ccc-redact = { path = "crates/ccc-redact" }
 ccc-wire = { path = "crates/ccc-wire" }
 
 anyhow = "1"
@@ -20,6 +21,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+hmac = "0.12"
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["http2", "rustls", "stream"] }
 serde = "1"

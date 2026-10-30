@@ -9,5 +9,5 @@ mod stage;
 
 pub use stage::{
     CompileError, Compiled, Context, Edit, OnFailure, Pipeline, Stage, StageError, StageOutcome,
-    StageTrace,
+    StageTrace, Target,
 };
