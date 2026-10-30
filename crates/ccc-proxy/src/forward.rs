@@ -1,19 +1,30 @@
 //! The forwarding path: one handler for every method and route.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
-use axum::body::{Body, to_bytes};
+use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Request, State as AxumState};
 use axum::http::header::{self, HeaderMap, HeaderName};
-use axum::http::{StatusCode, Uri};
+use axum::http::request::Parts;
+use axum::http::{Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
+use ccc_pipeline::{Compiled, Pipeline, StageOutcome};
 use futures_util::TryStreamExt;
 
-use crate::dump::Dumper;
+use crate::Stats;
+use crate::conversations::Conversations;
+use crate::dump::{Dumper, Exchange};
 
 /// Largest request body the proxy will buffer. Claude Code bodies can carry many
 /// base64 images on top of a 1M-token context, so this sits well above that.
 const MAX_REQUEST_BYTES: usize = 1 << 30;
+
+/// Paths whose bodies are Messages API requests.
+const COMPILED_PATHS: [&str; 2] = ["/v1/messages", "/v1/messages/count_tokens"];
+
+/// The header Claude Code uses to name its session.
+const SESSION_HEADER: &str = "x-claude-code-session-id";
 
 /// Connection-scoped headers that must not cross a proxy (RFC 9110 section 7.6.1).
 const HOP_BY_HOP: [HeaderName; 7] = [
@@ -31,6 +42,9 @@ pub(crate) struct State {
     pub(crate) upstream: String,
     pub(crate) client: reqwest::Client,
     pub(crate) dumper: Option<Dumper>,
+    pub(crate) pipeline: Pipeline,
+    pub(crate) conversations: Conversations,
+    pub(crate) stats: Arc<Stats>,
 }
 
 pub(crate) async fn handle(AxumState(state): AxumState<Arc<State>>, request: Request) -> Response {
@@ -46,6 +60,15 @@ pub(crate) async fn handle(AxumState(state): AxumState<Arc<State>>, request: Req
     let exchange = state.dumper.as_ref().map(|dumper| {
         dumper.record_request(parts.method.as_str(), &parts.uri, &parts.headers, &body)
     });
+
+    let body = if is_compiled_request(&parts) {
+        match compile_body(&state, &parts, body, exchange.as_ref()).await {
+            Ok(body) => body,
+            Err(response) => return *response,
+        }
+    } else {
+        body
+    };
 
     let upstream_url = upstream_url(&state.upstream, &parts.uri);
     let upstream_request = state
@@ -80,6 +103,89 @@ pub(crate) async fn handle(AxumState(state): AxumState<Arc<State>>, request: Req
     *response.status_mut() = status;
     *response.headers_mut() = headers;
     response
+}
+
+fn is_compiled_request(parts: &Parts) -> bool {
+    parts.method == Method::POST && COMPILED_PATHS.contains(&parts.uri.path())
+}
+
+/// Runs the pipeline over a request body. Forwards the original bytes unless a stage
+/// actually changed something, and also if the body isn't one the compiler understands.
+async fn compile_body(
+    state: &State,
+    parts: &Parts,
+    body: Bytes,
+    exchange: Option<&Exchange>,
+) -> Result<Bytes, Box<Response>> {
+    if parts.headers.contains_key(header::CONTENT_ENCODING) {
+        return Ok(body);
+    }
+    let parsed = match ccc_wire::Request::parse(&body) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            tracing::debug!(error = %err, "passing through a body the compiler can't read");
+            return Ok(body);
+        }
+    };
+    let session = parts
+        .headers
+        .get(SESSION_HEADER)
+        .and_then(|value| value.to_str().ok());
+    let context = state.conversations.context_for(session, &parsed);
+
+    let compiled = match state.pipeline.compile(parsed, context).await {
+        Ok(compiled) => compiled,
+        Err(err) => {
+            tracing::error!(error = %err, "request blocked");
+            state.stats.blocked.fetch_add(1, Ordering::Relaxed);
+            return Err(Box::new(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("ccc blocked this request: {err}"),
+            )));
+        }
+    };
+    record_trace(state, &compiled, exchange);
+
+    if !compiled.changed() {
+        state.stats.record(body.len(), body.len());
+        return Ok(body);
+    }
+    let rewritten = Bytes::from(compiled.request.to_bytes());
+    state.stats.record(body.len(), rewritten.len());
+    if let Some(exchange) = exchange {
+        exchange.record_compiled_body(&rewritten);
+    }
+    Ok(rewritten)
+}
+
+fn record_trace(state: &State, compiled: &Compiled, exchange: Option<&Exchange>) {
+    for entry in &compiled.trace {
+        match &entry.outcome {
+            StageOutcome::Skipped => {}
+            StageOutcome::Applied(edits) => {
+                state
+                    .stats
+                    .edits
+                    .fetch_add(edits.len() as u64, Ordering::Relaxed);
+                for edit in edits {
+                    tracing::debug!(
+                        stage = entry.stage,
+                        rule = edit.rule,
+                        message = edit.message,
+                        pointer = %edit.pointer,
+                        "edit"
+                    );
+                }
+            }
+            StageOutcome::Failed(_) | StageOutcome::TimedOut => {
+                state.stats.stage_failures.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        tracing::debug!(stage = entry.stage, elapsed = ?entry.elapsed, "stage finished");
+    }
+    if let Some(exchange) = exchange {
+        exchange.record_trace(&compiled.trace);
+    }
 }
 
 fn upstream_url(base: &str, uri: &Uri) -> String {

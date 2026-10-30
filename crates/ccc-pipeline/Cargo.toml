@@ -1,0 +1,17 @@
+[package]
+name = "ccc-pipeline"
+description = "Runs compiler stages over a request with time caps and failure policies"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ccc-wire.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

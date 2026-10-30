@@ -1,0 +1,16 @@
+[package]
+name = "ccc-prune"
+description = "Shrinks tool output the first time it is sent, using code-aware rules"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ccc-pipeline.workspace = true
+ccc-wire.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

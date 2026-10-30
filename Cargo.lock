@@ -193,8 +193,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ccc-bench",
+ "ccc-pipeline",
  "ccc-proxy",
+ "ccc-prune",
+ "ccc-wire",
  "clap",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -212,17 +216,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccc-pipeline"
+version = "0.1.0"
+dependencies = [
+ "ccc-wire",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ccc-proxy"
 version = "0.1.0"
 dependencies = [
  "axum",
  "bytes",
+ "ccc-pipeline",
+ "ccc-wire",
  "futures-util",
  "reqwest",
  "serde_json",
+ "sha2",
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "ccc-prune"
+version = "0.1.0"
+dependencies = [
+ "ccc-pipeline",
+ "ccc-wire",
+ "regex",
+ "serde_json",
 ]
 
 [[package]]
@@ -1105,6 +1133,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
 dependencies = [
  "rand_core",
+]
+
+[[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]

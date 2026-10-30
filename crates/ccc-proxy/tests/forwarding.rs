@@ -5,6 +5,7 @@
     reason = "test helpers fail loudly on setup errors"
 )]
 
+use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -17,6 +18,7 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::response::Response;
 use axum::routing::any;
+use ccc_pipeline::Pipeline;
 use ccc_proxy::{Proxy, ProxyConfig};
 use futures_util::StreamExt;
 use futures_util::stream;
@@ -62,7 +64,14 @@ struct RunningProxy {
 }
 
 async fn spawn_proxy(upstream: String, dump_dir: Option<PathBuf>) -> RunningProxy {
-    let proxy = Proxy::new(ProxyConfig { upstream, dump_dir }).unwrap();
+    let proxy = Proxy::new(ProxyConfig {
+        upstream,
+        dump_dir,
+        pipeline: Pipeline::default(),
+        disabled_stages: BTreeSet::new(),
+        state_dir: None,
+    })
+    .unwrap();
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
     let (stop, stopped) = oneshot::channel::<()>();

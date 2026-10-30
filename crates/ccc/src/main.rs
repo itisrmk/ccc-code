@@ -3,13 +3,17 @@
 mod bench;
 mod run;
 
+use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use anyhow::Context;
+use ccc_pipeline::{Pipeline, Stage};
 use ccc_proxy::{Proxy, ProxyConfig};
+use ccc_prune::Prune;
 use clap::{Args, Parser, Subcommand};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -45,22 +49,45 @@ struct ProxyArgs {
     /// Append logs to this file. Defaults to stderr for `serve` and off for `run`.
     #[arg(long, value_name = "FILE")]
     log_file: Option<PathBuf>,
+    /// Log what each stage changed. Use with --log-file under `run`.
+    #[arg(long)]
+    debug: bool,
+    /// Don't prune tool output in new conversations. Existing ones keep their settings.
+    #[arg(long)]
+    no_prune: bool,
+    /// Where per-conversation state lives. Defaults to ~/.ccc.
+    #[arg(long, value_name = "DIR")]
+    state_dir: Option<PathBuf>,
 }
 
 impl ProxyArgs {
     fn proxy(&self) -> anyhow::Result<Proxy> {
+        let mut disabled_stages = BTreeSet::new();
+        if self.no_prune {
+            disabled_stages.insert(Prune::new().name().to_owned());
+        }
         let config = ProxyConfig {
             upstream: self.upstream.clone(),
             dump_dir: self.dump.clone(),
+            pipeline: Pipeline::new(vec![Arc::new(Prune::new())]),
+            disabled_stages,
+            state_dir: self.state_dir.clone().or_else(default_state_dir),
         };
         Proxy::new(config).context("configuring proxy")
     }
+}
+
+fn default_state_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ccc"))
 }
 
 #[derive(Debug, Args)]
 struct RunArgs {
     #[command(flatten)]
     proxy: ProxyArgs,
+    /// Print a one-line summary when the command exits.
+    #[arg(long)]
+    stats: bool,
     /// The command to run and its arguments.
     #[arg(last = true, required = true, value_name = "COMMAND")]
     command: Vec<String>,
@@ -87,11 +114,11 @@ async fn main() -> anyhow::Result<ExitCode> {
     match Cli::parse().command {
         Command::Run(args) => {
             // `run` shares the terminal with a full-screen app, so stderr is off limits.
-            init_logging(args.proxy.log_file.as_deref(), LogDefault::Silent)?;
-            run::run(args.proxy.proxy()?, &args.command).await
+            init_logging(&args.proxy, LogDefault::Silent)?;
+            run::run(args.proxy.proxy()?, &args.command, args.stats).await
         }
         Command::Serve(args) => {
-            init_logging(args.proxy.log_file.as_deref(), LogDefault::Stderr)?;
+            init_logging(&args.proxy, LogDefault::Stderr)?;
             serve(args).await?;
             Ok(ExitCode::SUCCESS)
         }
@@ -126,10 +153,12 @@ enum LogDefault {
     Stderr,
 }
 
-fn init_logging(file: Option<&std::path::Path>, default: LogDefault) -> anyhow::Result<()> {
-    let filter = EnvFilter::try_from_env("CCC_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+fn init_logging(args: &ProxyArgs, default: LogDefault) -> anyhow::Result<()> {
+    let default_filter = if args.debug { "debug" } else { "info" };
+    let filter =
+        EnvFilter::try_from_env("CCC_LOG").unwrap_or_else(|_| EnvFilter::new(default_filter));
     let builder = tracing_subscriber::fmt().with_env_filter(filter);
-    match (file, default) {
+    match (args.log_file.as_deref(), default) {
         (Some(path), _) => {
             let log = OpenOptions::new()
                 .create(true)

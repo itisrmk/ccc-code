@@ -1,5 +1,6 @@
 //! `ccc run`: start the proxy on a free port and launch a child process against it.
 
+use std::io::Write;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{ExitCode, ExitStatus};
 
@@ -14,7 +15,12 @@ use tokio::sync::oneshot;
 const SIGNAL_EXIT_BASE: i32 = 128;
 
 /// Runs `command` with `ANTHROPIC_BASE_URL` pointing at `proxy`, returning its exit code.
-pub(crate) async fn run(proxy: Proxy, command: &[String]) -> anyhow::Result<ExitCode> {
+pub(crate) async fn run(
+    proxy: Proxy,
+    command: &[String],
+    show_stats: bool,
+) -> anyhow::Result<ExitCode> {
+    let stats = proxy.stats();
     let (program, args) = command
         .split_first()
         .context("no command given to run after --")?;
@@ -56,6 +62,9 @@ pub(crate) async fn run(proxy: Proxy, command: &[String]) -> anyhow::Result<Exit
         Err(err) => tracing::error!(error = %err, "proxy task failed"),
     }
 
+    if show_stats {
+        writeln!(std::io::stderr(), "{}", stats.summary()).context("printing stats")?;
+    }
     Ok(exit_code(status))
 }
 

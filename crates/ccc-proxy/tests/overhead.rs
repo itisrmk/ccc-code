@@ -6,11 +6,13 @@
     reason = "test helpers fail loudly on setup errors"
 )]
 
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::routing::any;
+use ccc_pipeline::Pipeline;
 use ccc_proxy::{Proxy, ProxyConfig};
 use tokio::net::TcpListener;
 
@@ -52,6 +54,9 @@ async fn added_latency_stays_within_budget() {
     let proxy = Proxy::new(ProxyConfig {
         upstream: format!("http://{upstream}"),
         dump_dir: None,
+        pipeline: Pipeline::default(),
+        disabled_stages: BTreeSet::new(),
+        state_dir: None,
     })
     .unwrap();
     let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();

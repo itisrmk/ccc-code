@@ -1,17 +1,23 @@
 //! HTTP proxy that sits between Claude Code and the Anthropic API.
 //!
-//! Every method and path is forwarded. Request and response bodies pass through
-//! byte for byte, and response bodies are streamed chunk by chunk so server-sent
-//! events reach the client as soon as upstream produces them.
+//! Every method and path is forwarded. Messages API requests run through the compiler
+//! pipeline, and anything no stage changed goes out byte for byte. Response bodies are
+//! streamed chunk by chunk, so server-sent events reach the client as upstream produces them.
 
+mod conversations;
 mod dump;
 mod forward;
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
+use ccc_pipeline::Pipeline;
 use tokio::net::TcpListener;
+
+use crate::conversations::Conversations;
 
 use crate::dump::Dumper;
 
@@ -53,6 +59,50 @@ pub struct ProxyConfig {
     ///
     /// Dumps hold real prompts and tool output with auth headers removed.
     pub dump_dir: Option<PathBuf>,
+    /// The stages to compile requests with.
+    pub pipeline: Pipeline,
+    /// Stages new conversations start without. Existing conversations keep the settings
+    /// they started with, since changing them would rewrite history the server has seen.
+    pub disabled_stages: BTreeSet<String>,
+    /// Directory for per-conversation state. `None` keeps it in memory, in which case a
+    /// restart in the middle of a conversation can invalidate its thinking blocks.
+    pub state_dir: Option<PathBuf>,
+}
+
+/// Running totals for a proxy, readable while it serves.
+#[derive(Debug, Default)]
+pub struct Stats {
+    requests: AtomicU64,
+    bytes_in: AtomicU64,
+    bytes_out: AtomicU64,
+    edits: AtomicU64,
+    stage_failures: AtomicU64,
+    blocked: AtomicU64,
+}
+
+impl Stats {
+    fn record(&self, bytes_in: usize, bytes_out: usize) {
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        self.bytes_in.fetch_add(bytes_in as u64, Ordering::Relaxed);
+        self.bytes_out
+            .fetch_add(bytes_out as u64, Ordering::Relaxed);
+    }
+
+    /// A one-line summary suitable for a terminal.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let bytes_in = self.bytes_in.load(Ordering::Relaxed);
+        let bytes_out = self.bytes_out.load(Ordering::Relaxed);
+        format!(
+            "ccc: {} requests compiled, {} edits, {} KB saved of {} KB sent, {} stage failures, {} blocked",
+            self.requests.load(Ordering::Relaxed),
+            self.edits.load(Ordering::Relaxed),
+            bytes_in.saturating_sub(bytes_out) / 1024,
+            bytes_in / 1024,
+            self.stage_failures.load(Ordering::Relaxed),
+            self.blocked.load(Ordering::Relaxed),
+        )
+    }
 }
 
 /// A configured proxy, ready to serve on a listener.
@@ -76,13 +126,32 @@ impl Proxy {
             .build()
             .map_err(ProxyError::Client)?;
         let dumper = config.dump_dir.map(Dumper::create).transpose()?;
+        let enabled_for_new: BTreeSet<String> = config
+            .pipeline
+            .stage_names()
+            .filter(|name| !config.disabled_stages.contains(*name))
+            .map(str::to_owned)
+            .collect();
+        let conversations = Conversations::new(
+            config.state_dir.map(|dir| dir.join("conversations")),
+            enabled_for_new,
+        );
         Ok(Self {
             state: Arc::new(forward::State {
                 upstream,
                 client,
                 dumper,
+                pipeline: config.pipeline,
+                conversations,
+                stats: Arc::default(),
             }),
         })
+    }
+
+    /// A handle to this proxy's running totals.
+    #[must_use]
+    pub fn stats(&self) -> Arc<Stats> {
+        Arc::clone(&self.state.stats)
     }
 
     /// Serves requests from `listener` until `shutdown` resolves.

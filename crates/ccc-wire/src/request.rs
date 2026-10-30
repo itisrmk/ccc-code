@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
@@ -101,6 +102,17 @@ impl Request {
         self.fields.get(name).filter(|_| name != MESSAGES)
     }
 
+    /// Replaces message `index` entirely. Returns whether it existed.
+    pub fn set_message(&mut self, index: usize, message: Arc<Value>) -> bool {
+        match self.messages.get_mut(index) {
+            Some(slot) => {
+                *slot = message;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Replaces the value at `pointer` (RFC 6901) within message `index`.
     ///
     /// Returns whether the target existed. Only the edited message is copied, and only
@@ -126,9 +138,9 @@ fn write_json(out: &mut Vec<u8>, value: &(impl serde::Serialize + ?Sized)) {
 /// Joins the text parts of a `tool_result` block's `content`, which may be a string or
 /// a list of parts. Returns `None` if it holds anything other than text.
 #[must_use]
-pub fn text_of_tool_result(content: &Value) -> Option<String> {
+pub fn text_of_tool_result(content: &Value) -> Option<Cow<'_, str>> {
     match content {
-        Value::String(text) => Some(text.clone()),
+        Value::String(text) => Some(Cow::Borrowed(text)),
         Value::Array(parts) => {
             let mut joined = String::new();
             for part in parts {
@@ -137,7 +149,7 @@ pub fn text_of_tool_result(content: &Value) -> Option<String> {
                 }
                 joined.push_str(part.get("text").and_then(Value::as_str)?);
             }
-            Some(joined)
+            Some(Cow::Owned(joined))
         }
         _ => None,
     }

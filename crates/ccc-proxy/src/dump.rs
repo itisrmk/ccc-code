@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::http::Uri;
 use axum::http::header::{self, HeaderMap, HeaderName};
 use bytes::Bytes;
+use ccc_pipeline::{StageOutcome, StageTrace};
 use tokio::sync::mpsc;
 
 use crate::ProxyError;
@@ -98,6 +99,46 @@ impl Exchange {
         });
         self.body = Some(sender);
         self
+    }
+
+    pub(crate) fn record_compiled_body(&self, body: &[u8]) {
+        write_private(&self.stem.with_extension("req-compiled.json"), body);
+    }
+
+    pub(crate) fn record_trace(&self, trace: &[StageTrace]) {
+        let entries: Vec<serde_json::Value> = trace
+            .iter()
+            .map(|entry| {
+                let (outcome, edits) = match &entry.outcome {
+                    StageOutcome::Skipped => ("skipped", Vec::new()),
+                    StageOutcome::Failed(_) => ("failed", Vec::new()),
+                    StageOutcome::TimedOut => ("timed_out", Vec::new()),
+                    StageOutcome::Applied(edits) => (
+                        "applied",
+                        edits
+                            .iter()
+                            .map(|edit| {
+                                serde_json::json!({
+                                    "message": edit.message,
+                                    "pointer": edit.pointer,
+                                    "rule": edit.rule,
+                                })
+                            })
+                            .collect(),
+                    ),
+                };
+                serde_json::json!({
+                    "stage": entry.stage,
+                    "elapsed_micros": entry.elapsed.as_micros() as u64,
+                    "outcome": outcome,
+                    "edits": edits,
+                })
+            })
+            .collect();
+        write_private(
+            &self.stem.with_extension("trace.json"),
+            serde_json::Value::Array(entries).to_string().as_bytes(),
+        );
     }
 
     pub(crate) fn record_response_head(&self, status: u16, headers: &HeaderMap) {
