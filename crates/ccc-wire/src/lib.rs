@@ -5,5 +5,6 @@
 //! order, number spelling and every unknown field, with accessors for what stages need.
 
 mod request;
+pub mod sse;
 
 pub use request::{ParseRequestError, Request, text_of_tool_result};

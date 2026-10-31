@@ -328,6 +328,7 @@ mod tests {
         Context {
             protected_before: 0,
             enabled: BTreeSet::from(["redact".to_owned()]),
+            spent_micros: 0,
         }
     }
 

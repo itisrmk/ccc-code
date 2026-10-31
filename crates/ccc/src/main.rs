@@ -5,20 +5,25 @@ mod run;
 
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::Context;
+use ccc_ledger::Ledger;
 use ccc_pipeline::{Pipeline, Stage};
 use ccc_proxy::{Proxy, ProxyConfig};
 use ccc_prune::Prune;
 use ccc_redact::{Detector, Redact, Vault};
+use ccc_route::{Route, RouteRules, StripNotices};
 use clap::{Args, Parser, Subcommand};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
+
+/// The usage record, inside the state directory.
+const LEDGER_FILE: &str = "ledger.sqlite";
 
 /// Project redaction rules, relative to the directory `ccc` runs in.
 const DEFAULT_REDACT_RULES: &str = ".ccc/redact-rules";
@@ -41,6 +46,8 @@ enum Command {
     Serve(ServeArgs),
     /// Replay local transcripts and report token and cost effects. Nothing leaves the machine.
     Bench(BenchArgs),
+    /// Show what recent sessions cost at list prices.
+    Stats(StatsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -67,6 +74,20 @@ struct ProxyArgs {
     /// are ignored. Defaults to .ccc/redact-rules in the current directory, if present.
     #[arg(long, value_name = "FILE")]
     redact_rules: Option<PathBuf>,
+    /// The model for background calls such as naming a session. `local:NAME` sends them
+    /// to --local-url. Off by default; Claude Code already uses a small model for these.
+    #[arg(long, value_name = "MODEL")]
+    background_model: Option<String>,
+    /// Base URL of a local model with an Anthropic-compatible API.
+    #[arg(long, value_name = "URL")]
+    local_url: Option<String>,
+    /// Show a one-line notice when a session's cost at list prices passes this many dollars.
+    #[arg(long, value_name = "USD")]
+    budget_usd: Option<f64>,
+    /// Move to this model once over --budget-usd. Its first call re-writes the whole
+    /// context to that model's cache and drops thinking the new model can't read.
+    #[arg(long, value_name = "MODEL", requires = "budget_usd")]
+    budget_downshift: Option<String>,
     /// Have the API reject any edit to history behind a thinking block. For testing: this
     /// is already the default for accounts created on or after 2026-08-31.
     #[arg(long)]
@@ -86,6 +107,16 @@ impl ProxyArgs {
         let redact = Redact::new(self.detector()?, Arc::clone(&vault));
         let prune = Prune::new();
 
+        let route = Route::new(RouteRules {
+            background_model: self.background_model.clone(),
+            budget_usd: self.budget_usd,
+            budget_model: self.budget_downshift.clone(),
+        });
+        let ledger = match &state_dir {
+            Some(dir) => Ledger::open(&dir.join(LEDGER_FILE)).context("opening ledger")?,
+            None => Ledger::in_memory().context("creating ledger")?,
+        };
+
         let mut disabled_stages = BTreeSet::new();
         if self.no_redact {
             disabled_stages.insert(redact.name().to_owned());
@@ -97,11 +128,19 @@ impl ProxyArgs {
             upstream: self.upstream.clone(),
             dump_dir: self.dump.clone(),
             // Secrets go first, so nothing later handles or logs a real value.
-            pipeline: Pipeline::new(vec![Arc::new(redact), Arc::new(prune)]),
+            pipeline: Pipeline::new(vec![
+                Arc::new(StripNotices),
+                Arc::new(redact),
+                Arc::new(prune),
+                Arc::new(route),
+            ]),
             disabled_stages,
             state_dir,
             vault: Some(vault),
             enforce_thinking_check: self.enforce_thinking_check,
+            ledger: Some(Arc::new(ledger)),
+            budget_usd: self.budget_usd,
+            local_url: self.local_url.clone(),
         };
         Proxy::new(config).context("configuring proxy")
     }
@@ -166,6 +205,16 @@ struct BenchArgs {
     transcripts: PathBuf,
 }
 
+#[derive(Debug, Args)]
+struct StatsArgs {
+    /// How many recent sessions to show.
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+    /// Where per-conversation state lives. Defaults to ~/.ccc.
+    #[arg(long, value_name = "DIR")]
+    state_dir: Option<PathBuf>,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<ExitCode> {
     match Cli::parse().command {
@@ -179,11 +228,45 @@ async fn main() -> anyhow::Result<ExitCode> {
             serve(args).await?;
             Ok(ExitCode::SUCCESS)
         }
+        Command::Stats(args) => {
+            stats(&args)?;
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Bench(args) => {
             bench::run(&args.transcripts)?;
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+fn stats(args: &StatsArgs) -> anyhow::Result<()> {
+    let dir = args
+        .state_dir
+        .clone()
+        .or_else(default_state_dir)
+        .context("no state directory: set --state-dir or HOME")?;
+    let ledger = Ledger::open(&dir.join(LEDGER_FILE)).context("opening ledger")?;
+    let sessions = ledger
+        .recent_sessions(args.limit)
+        .context("reading ledger")?;
+    let mut out = std::io::stdout();
+    writeln!(
+        out,
+        "{:<38}{:>7}{:>16}{:>12}{:>11}",
+        "session", "calls", "context tokens", "output", "cost"
+    )?;
+    for session in sessions {
+        writeln!(
+            out,
+            "{:<38}{:>7}{:>16}{:>12}{:>11}",
+            session.session,
+            session.calls,
+            session.context_tokens,
+            session.output_tokens,
+            format!("${:.4}", session.cost_usd),
+        )?;
+    }
+    Ok(())
 }
 
 async fn serve(args: ServeArgs) -> anyhow::Result<()> {

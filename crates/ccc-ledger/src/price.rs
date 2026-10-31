@@ -1,6 +1,6 @@
 //! Dollar cost of a call at Anthropic's first-party list prices.
 
-use crate::transcript::Usage;
+use crate::usage::Usage;
 
 /// Cache write price for a 5-minute lifetime, as a multiple of the input price.
 const WRITE_5M_MULTIPLE: f64 = 1.25;
@@ -38,7 +38,8 @@ fn prices(model: &str, context_tokens: u64) -> Option<Prices> {
 }
 
 /// The dollar cost of `usage` on `model`, or `None` if the model has no known price.
-pub(crate) fn cost_usd(model: &str, usage: &Usage) -> Option<f64> {
+#[must_use]
+pub fn cost_usd(model: &str, usage: &Usage) -> Option<f64> {
     let price = prices(model, usage.context())?;
     let per_token =
         |tokens: u64, dollars_per_million: f64| tokens as f64 * dollars_per_million / 1_000_000.0;

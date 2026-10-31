@@ -10,6 +10,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ccc_ledger::Usage;
 use ccc_wire::Request;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -23,52 +24,6 @@ const MAX_UNRESOLVED_FRACTION: f64 = 0.02;
 
 /// The field added to assistant messages to record their hidden thinking tokens.
 pub(crate) const THINKING_TOKENS_KEY: &str = "ccc_thinking_tokens";
-
-/// Token counts the API reported for one call.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Usage {
-    /// Input tokens that were neither read from nor written to the cache.
-    pub input: u64,
-    /// Input tokens read from the cache.
-    pub cache_read: u64,
-    /// Input tokens written to the cache with a 5-minute lifetime.
-    pub cache_write_5m: u64,
-    /// Input tokens written to the cache with a 1-hour lifetime.
-    pub cache_write_1h: u64,
-    /// Tokens generated.
-    pub output: u64,
-    /// The part of `output` that was hidden thinking.
-    pub thinking: u64,
-}
-
-impl Usage {
-    /// The size of the request's context in tokens.
-    #[must_use]
-    pub fn context(&self) -> u64 {
-        self.input + self.cache_read + self.cache_write_5m + self.cache_write_1h
-    }
-
-    fn from_json(usage: &Value) -> Self {
-        let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
-        let written = count("cache_creation_input_tokens");
-        let long = usage
-            .pointer("/cache_creation/ephemeral_1h_input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            .min(written);
-        Self {
-            input: count("input_tokens"),
-            cache_read: count("cache_read_input_tokens"),
-            cache_write_5m: written - long,
-            cache_write_1h: long,
-            output: count("output_tokens"),
-            thinking: usage
-                .pointer("/output_tokens_details/thinking_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-        }
-    }
-}
 
 /// One API call rebuilt from a transcript.
 #[derive(Debug, Clone)]

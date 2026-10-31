@@ -72,6 +72,9 @@ async fn spawn_proxy(upstream: String, dump_dir: Option<PathBuf>) -> RunningProx
         state_dir: None,
         vault: None,
         enforce_thinking_check: false,
+        ledger: None,
+        budget_usd: None,
+        local_url: None,
     })
     .unwrap();
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();

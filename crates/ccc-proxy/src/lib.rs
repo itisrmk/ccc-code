@@ -7,6 +7,7 @@
 mod conversations;
 mod dump;
 mod forward;
+mod response;
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -14,6 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
+use ccc_ledger::Ledger;
 use ccc_pipeline::Pipeline;
 use ccc_redact::Vault;
 use tokio::net::TcpListener;
@@ -74,6 +76,12 @@ pub struct ProxyConfig {
     /// it already does for accounts created on or after 2026-08-31. For testing the
     /// compiler from an older account, where such an edit would otherwise go unreported.
     pub enforce_thinking_check: bool,
+    /// Where to record what each call cost.
+    pub ledger: Option<Arc<Ledger>>,
+    /// Session cost, in dollars, at which to show a one-line notice.
+    pub budget_usd: Option<f64>,
+    /// Base URL of a local model with an Anthropic-compatible API, for calls routed to it.
+    pub local_url: Option<String>,
 }
 
 /// Running totals for a proxy, readable while it serves.
@@ -85,6 +93,9 @@ pub struct Stats {
     edits: AtomicU64,
     stage_failures: AtomicU64,
     blocked: AtomicU64,
+    local_fallbacks: AtomicU64,
+    /// Accumulated cost, in millionths of a dollar.
+    cost_micros: AtomicU64,
 }
 
 impl Stats {
@@ -95,17 +106,24 @@ impl Stats {
             .fetch_add(bytes_out as u64, Ordering::Relaxed);
     }
 
+    fn add_cost(&self, usd: f64) {
+        // Whole micro-dollars are far finer than anything this reports.
+        self.cost_micros
+            .fetch_add((usd * 1_000_000.0) as u64, Ordering::Relaxed);
+    }
+
     /// A one-line summary suitable for a terminal.
     #[must_use]
     pub fn summary(&self) -> String {
         let bytes_in = self.bytes_in.load(Ordering::Relaxed);
         let bytes_out = self.bytes_out.load(Ordering::Relaxed);
         format!(
-            "ccc: {} requests compiled, {} edits, {} KB saved of {} KB sent, {} stage failures, {} blocked",
+            "ccc: {} requests compiled, {} edits, {} KB saved of {} KB sent, ${:.4} at list prices, {} stage failures, {} blocked",
             self.requests.load(Ordering::Relaxed),
             self.edits.load(Ordering::Relaxed),
             bytes_in.saturating_sub(bytes_out) / 1024,
             bytes_in / 1024,
+            self.cost_micros.load(Ordering::Relaxed) as f64 / 1_000_000.0,
             self.stage_failures.load(Ordering::Relaxed),
             self.blocked.load(Ordering::Relaxed),
         )
@@ -154,6 +172,12 @@ impl Proxy {
                 must_inspect,
                 vault: config.vault,
                 enforce_thinking_check: config.enforce_thinking_check,
+                ledger: config.ledger,
+                budget_usd: config.budget_usd,
+                local_url: config
+                    .local_url
+                    .map(|url| url.trim_end_matches('/').to_owned()),
+                noticed: Arc::default(),
                 stats: Arc::default(),
             }),
         })

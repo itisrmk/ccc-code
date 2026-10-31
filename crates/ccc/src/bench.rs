@@ -91,6 +91,7 @@ pub(crate) fn run(transcripts: &Path) -> anyhow::Result<()> {
     let redact_context = Context {
         protected_before: 0,
         enabled: BTreeSet::from(["redact".to_owned(), "prune".to_owned()]),
+        spent_micros: 0,
     };
     let compile_all = |request: &Request| {
         redacting
@@ -269,6 +270,7 @@ impl Compiler {
             context: Context {
                 protected_before: 0,
                 enabled: BTreeSet::from(["prune".to_owned()]),
+                spent_micros: 0,
             },
             interned: RefCell::default(),
         }

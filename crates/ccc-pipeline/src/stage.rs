@@ -13,6 +13,8 @@ pub enum Target {
     Message(usize),
     /// The top-level `system` prompt.
     System,
+    /// The top-level `model`, which isn't part of the history thinking blocks bind to.
+    Model,
 }
 
 /// One replacement inside one message or the system prompt.
@@ -51,6 +53,9 @@ pub struct Context {
     /// Stages that run for this conversation. Pinned when the conversation is first
     /// seen, since switching a stage mid-conversation would rewrite history.
     pub enabled: BTreeSet<String>,
+    /// What this session has cost so far, in millionths of a dollar. Unlike the rest this
+    /// changes between calls, so it may only drive decisions outside the bound history.
+    pub spent_micros: u64,
 }
 
 /// One step of the compiler.
@@ -305,6 +310,7 @@ fn apply(
                 request.set_in_message(index, &edit.pointer, edit.value.clone())
             }
             Target::System => request.set_in_field("system", &edit.pointer, edit.value.clone()),
+            Target::Model => request.set_in_field("model", &edit.pointer, edit.value.clone()),
         };
         if found {
             applied.push(edit);
@@ -320,6 +326,7 @@ fn is_protected(target: Target, context: &Context) -> bool {
     match target {
         Target::Message(index) => index < context.protected_before,
         Target::System => context.protected_before > 0,
+        Target::Model => false,
     }
 }
 
@@ -409,6 +416,7 @@ mod tests {
         let context = Context {
             protected_before: 0,
             enabled: stages.iter().map(|s| s.name.to_owned()).collect(),
+            spent_micros: 0,
         };
         let stages = stages
             .into_iter()

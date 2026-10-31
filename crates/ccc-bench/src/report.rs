@@ -4,15 +4,15 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+use ccc_ledger::{Usage, cost_usd};
 use ccc_wire::Request;
 use serde_json::Value;
 
 use crate::cache_sim::{
     CacheSim, Fingerprint, Ttl, chain_next, fingerprint, message_fingerprint, tools_fingerprint,
 };
-use crate::cost::cost_usd;
 use crate::estimate::{self, Rates, Size, Source};
-use crate::transcript::{Call, LoadSummary, Session, Usage};
+use crate::transcript::{Call, LoadSummary, Session};
 
 /// How far the simulated baseline may stray from recorded usage.
 const BASELINE_TOLERANCE: f64 = 0.10;

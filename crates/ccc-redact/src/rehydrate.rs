@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use ccc_wire::sse::{event_json, frame_length};
 use serde_json::{Value, json};
 
 use crate::vault::{PLACEHOLDER_HEX_DIGITS, PLACEHOLDER_PREFIX, Vault};
@@ -164,7 +165,7 @@ impl ResponseRehydrator {
     }
 
     fn process_frame(&mut self, frame: &[u8], out: &mut Vec<u8>) {
-        let Some(event) = parse_event(frame) else {
+        let Some(event) = event_json(frame) else {
             out.extend_from_slice(frame);
             return;
         };
@@ -232,32 +233,6 @@ fn write_delta(index: u64, delta_type: &str, field: &str, text: &str, out: &mut 
     delta.insert(field.to_owned(), json!(text));
     let event = json!({ "type": "content_block_delta", "index": index, "delta": delta });
     out.extend_from_slice(format!("event: content_block_delta\ndata: {event}\n\n").as_bytes());
-}
-
-/// The length of the first complete event in `buffer`, including its blank line.
-fn frame_length(buffer: &[u8]) -> Option<usize> {
-    let lf = find(buffer, b"\n\n").map(|at| at + 2);
-    let crlf = find(buffer, b"\r\n\r\n").map(|at| at + 4);
-    match (lf, crlf) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    }
-}
-
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
-
-/// The JSON payload of an event, if it has one.
-fn parse_event(frame: &[u8]) -> Option<Value> {
-    let text = std::str::from_utf8(frame).ok()?;
-    let data = text
-        .lines()
-        .find_map(|line| line.strip_prefix("data:"))
-        .map(str::trim)?;
-    serde_json::from_str(data).ok()
 }
 
 /// Rehydrates a complete, non-streaming JSON response. Returns `None` if nothing changed.
@@ -413,7 +388,7 @@ mod tests {
         std::str::from_utf8(stream)
             .unwrap()
             .split("\n\n")
-            .filter_map(|frame| parse_event(frame.as_bytes()))
+            .filter_map(|frame| event_json(frame.as_bytes()))
             .filter_map(|event| {
                 event
                     .pointer("/delta/text")
@@ -531,7 +506,7 @@ mod tests {
         let joined: String = std::str::from_utf8(&out)
             .unwrap()
             .split("\n\n")
-            .filter_map(|frame| parse_event(frame.as_bytes()))
+            .filter_map(|frame| event_json(frame.as_bytes()))
             .filter_map(|event| {
                 event
                     .pointer("/delta/partial_json")

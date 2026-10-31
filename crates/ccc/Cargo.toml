@@ -13,10 +13,12 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 ccc-bench.workspace = true
+ccc-ledger.workspace = true
 ccc-pipeline.workspace = true
 ccc-proxy.workspace = true
 ccc-prune.workspace = true
 ccc-redact.workspace = true
+ccc-route.workspace = true
 ccc-wire.workspace = true
 clap.workspace = true
 serde_json.workspace = true

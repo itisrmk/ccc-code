@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn samples_measure_content_change_against_context_growth() {
-        use crate::transcript::Usage;
+        use ccc_ledger::Usage;
         use ccc_wire::Request;
         use serde_json::json;
         let message = |text: &str| Arc::new(json!({ "role": "user", "content": text }));

@@ -16,9 +16,11 @@ use axum::body::{Bytes, to_bytes};
 use axum::extract::{Request as AxumRequest, State};
 use axum::http::StatusCode;
 use axum::routing::any;
+use ccc_ledger::Ledger;
 use ccc_pipeline::{Context, Edit, OnFailure, Pipeline, Stage, StageError, Target};
 use ccc_proxy::{Proxy, ProxyConfig};
 use ccc_redact::{Detector, Redact, Vault};
+use ccc_route::{Route, RouteRules, StripNotices};
 use ccc_wire::Request;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -104,6 +106,9 @@ struct Setup {
     disabled: BTreeSet<String>,
     state_dir: Option<PathBuf>,
     vault: Option<Arc<Vault>>,
+    ledger: Option<Arc<Ledger>>,
+    budget_usd: Option<f64>,
+    local_url: Option<String>,
 }
 
 impl Default for Setup {
@@ -113,6 +118,9 @@ impl Default for Setup {
             disabled: BTreeSet::new(),
             state_dir: None,
             vault: None,
+            ledger: None,
+            budget_usd: None,
+            local_url: None,
         }
     }
 }
@@ -126,6 +134,9 @@ async fn spawn_proxy(upstream: SocketAddr, setup: Setup) -> SocketAddr {
         state_dir: setup.state_dir,
         vault: setup.vault,
         enforce_thinking_check: false,
+        ledger: setup.ledger,
+        budget_usd: setup.budget_usd,
+        local_url: setup.local_url,
     })
     .unwrap();
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -428,4 +439,180 @@ async fn with_redaction_on_unreadable_bodies_never_reach_upstream() {
         .unwrap();
     assert_eq!(compressed.status(), StatusCode::BAD_REQUEST);
     assert!(bodies.lock().unwrap().is_empty());
+}
+
+const MODEL_REPLY: &str = concat!(
+    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-opus-5-5\",",
+    "\"usage\":{\"input_tokens\":0,\"cache_read_input_tokens\":1000000,\"output_tokens\":1}}}\n\n",
+    "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"answer\"}}\n\n",
+    "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+    "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1000000}}\n\n",
+    "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+);
+
+async fn model_reply(
+    State(bodies): State<Bodies>,
+    request: AxumRequest,
+) -> axum::response::Response {
+    let auth = request.headers().contains_key("x-api-key");
+    let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+    bodies.lock().unwrap().push((format!("auth={auth}"), body));
+    axum::response::Response::builder()
+        .header("content-type", "text/event-stream")
+        .body(axum::body::Body::from(MODEL_REPLY))
+        .unwrap()
+}
+
+async fn spawn_model() -> (SocketAddr, Bodies) {
+    let bodies = Bodies::default();
+    let app = Router::new()
+        .fallback(any(model_reply))
+        .with_state(Arc::clone(&bodies));
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (address, bodies)
+}
+
+#[tokio::test]
+async fn usage_reaches_the_ledger_and_a_budget_notice_appears_once_then_is_stripped() {
+    let (upstream, bodies) = spawn_model().await;
+    let ledger = Arc::new(Ledger::in_memory().unwrap());
+    let proxy = spawn_proxy(
+        upstream,
+        Setup {
+            pipeline: Pipeline::new(vec![Arc::new(StripNotices)]),
+            ledger: Some(Arc::clone(&ledger)),
+            budget_usd: Some(1.0),
+            ..Setup::default()
+        },
+    )
+    .await;
+    let body =
+        r#"{"model":"claude-opus-5-5","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+
+    // $20.20 at list prices: output of 1M tokens plus a read of 1M.
+    let first = post(proxy, "/v1/messages", body)
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(first.contains("answer"));
+    assert!(
+        !first.contains("[ccc budget]"),
+        "nothing spent yet: {first}"
+    );
+
+    let mut spent = 0.0;
+    for _ in 0..100 {
+        spent = ledger.session_cost("session-1").unwrap();
+        if spent > 0.0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!((spent - 20.2).abs() < 1e-6, "{spent}");
+
+    let second = post(proxy, "/v1/messages", body)
+        .await
+        .text()
+        .await
+        .unwrap();
+    let notice_block = second.find("[ccc budget]").expect("over budget now");
+    assert!(notice_block < second.find("answer").unwrap(), "{second}");
+
+    let third = post(proxy, "/v1/messages", body)
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(!third.contains("[ccc budget]"), "only once: {third}");
+
+    // Claude Code replays the notice as part of the assistant turn. The model mustn't see it.
+    let replay = json!({ "model": "claude-opus-5-5", "messages": [
+        { "role": "user", "content": "hi" },
+        { "role": "assistant", "content": [
+            { "type": "text", "text": "answer" },
+            { "type": "text", "text": "[ccc budget] This session has used a lot." },
+        ] },
+        { "role": "user", "content": "more" },
+    ] });
+    post(proxy, "/v1/messages", &replay.to_string()).await;
+    let (_, sent) = bodies.lock().unwrap().last().unwrap().clone();
+    let sent: Value = serde_json::from_slice(&sent).unwrap();
+    assert_eq!(
+        sent["messages"][1]["content"],
+        json!([{ "type": "text", "text": "answer" }])
+    );
+}
+
+fn routing_to_local() -> Pipeline {
+    Pipeline::new(vec![Arc::new(Route::new(RouteRules {
+        background_model: Some("local:qwen3".to_owned()),
+        ..RouteRules::default()
+    }))])
+}
+
+#[tokio::test]
+async fn background_calls_go_local_without_credentials() {
+    let (upstream, upstream_bodies) = spawn_model().await;
+    let (local, local_bodies) = spawn_model().await;
+    let proxy = spawn_proxy(
+        upstream,
+        Setup {
+            pipeline: routing_to_local(),
+            local_url: Some(format!("http://{local}")),
+            ..Setup::default()
+        },
+    )
+    .await;
+
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("http://{proxy}/v1/messages"))
+        .header("x-api-key", "real-key")
+        .body(r#"{"model":"claude-haiku-5-5","stream":true,"messages":[{"role":"user","content":"title"}]}"#)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(upstream_bodies.lock().unwrap().is_empty());
+    let local_bodies = local_bodies.lock().unwrap();
+    let (auth, sent) = &local_bodies[0];
+    assert_eq!(
+        auth, "auth=false",
+        "Anthropic credentials stay away from local models"
+    );
+    let sent: Value = serde_json::from_slice(sent).unwrap();
+    assert_eq!(sent["model"], "qwen3");
+}
+
+#[tokio::test]
+async fn a_failing_local_model_falls_back_with_the_original_model() {
+    let (upstream, upstream_bodies) = spawn_model().await;
+    let dead = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let dead_address = dead.local_addr().unwrap();
+    drop(dead);
+    let proxy = spawn_proxy(
+        upstream,
+        Setup {
+            pipeline: routing_to_local(),
+            local_url: Some(format!("http://{dead_address}")),
+            ..Setup::default()
+        },
+    )
+    .await;
+
+    let body = r#"{"model":"claude-haiku-5-5","stream":true,"messages":[{"role":"user","content":"title"}]}"#;
+    let response = post(proxy, "/v1/messages", body).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.text().await.unwrap().contains("answer"));
+    let bodies = upstream_bodies.lock().unwrap();
+    let sent: Value = serde_json::from_slice(&bodies[0].1).unwrap();
+    assert_eq!(sent["model"], "claude-haiku-5-5");
 }

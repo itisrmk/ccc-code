@@ -10,10 +10,12 @@ publish = false
 
 [workspace.dependencies]
 ccc-bench = { path = "crates/ccc-bench" }
+ccc-ledger = { path = "crates/ccc-ledger" }
 ccc-pipeline = { path = "crates/ccc-pipeline" }
 ccc-proxy = { path = "crates/ccc-proxy" }
 ccc-prune = { path = "crates/ccc-prune" }
 ccc-redact = { path = "crates/ccc-redact" }
+ccc-route = { path = "crates/ccc-route" }
 ccc-wire = { path = "crates/ccc-wire" }
 
 anyhow = "1"
@@ -24,6 +26,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 hmac = "0.12"
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["http2", "rustls", "stream"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde = "1"
 serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
 sha2 = "0.10"

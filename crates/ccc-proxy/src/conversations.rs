@@ -48,6 +48,7 @@ impl Conversations {
             let context = Context {
                 protected_before: if has_history { messages.len() } else { 0 },
                 enabled: self.enabled_for_new.clone(),
+                spent_micros: 0,
             };
             self.store(&key, &context);
             context
@@ -80,6 +81,7 @@ impl Conversations {
                 .filter_map(Value::as_str)
                 .map(str::to_owned)
                 .collect(),
+            spent_micros: 0,
         })
     }
 

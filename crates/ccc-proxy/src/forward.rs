@@ -1,21 +1,24 @@
 //! The forwarding path: one handler for every method and route.
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
 
-use axum::body::{Body, Bytes, to_bytes};
+use axum::body::{Bytes, to_bytes};
 use axum::extract::{Request, State as AxumState};
 use axum::http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use axum::http::request::Parts;
 use axum::http::{Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
+use ccc_ledger::Ledger;
 use ccc_pipeline::{Compiled, Pipeline, StageOutcome};
-use ccc_redact::{ResponseRehydrator, Vault, rehydrate_json};
-use futures_util::{Stream, StreamExt, TryStreamExt};
+use ccc_redact::Vault;
+use ccc_route::{LOCAL_PREFIX, budget_notice};
+use futures_util::TryStreamExt;
 
 use crate::Stats;
 use crate::conversations::Conversations;
 use crate::dump::{Dumper, Exchange};
+use crate::response::{Accounting, NoticedSessions, ResponsePlan, processed_body};
 
 /// Largest request body the proxy will buffer. Claude Code bodies can carry many
 /// base64 images on top of a 1M-token context, so this sits well above that.
@@ -56,6 +59,10 @@ pub(crate) struct State {
     pub(crate) must_inspect: bool,
     pub(crate) vault: Option<Arc<Vault>>,
     pub(crate) enforce_thinking_check: bool,
+    pub(crate) ledger: Option<Arc<Ledger>>,
+    pub(crate) budget_usd: Option<f64>,
+    pub(crate) local_url: Option<String>,
+    pub(crate) noticed: Arc<NoticedSessions>,
     pub(crate) stats: Arc<Stats>,
 }
 
@@ -73,42 +80,55 @@ pub(crate) async fn handle(AxumState(state): AxumState<Arc<State>>, request: Req
         dumper.record_request(parts.method.as_str(), &parts.uri, &parts.headers, &body)
     });
 
-    let compiled_request = is_compiled_request(&parts);
-    let (body, rehydrate_from) = if compiled_request {
+    let is_compiled = is_compiled_request(&parts);
+    let outcome = if is_compiled {
         match compile_body(&state, &parts, body, exchange.as_ref()).await {
-            Ok(compiled) => compiled,
+            Ok(outcome) => outcome,
             Err(response) => return *response,
         }
     } else {
-        (body, None)
+        CompileOutcome::unchanged(body)
     };
+    let CompileOutcome {
+        body,
+        local_body,
+        plan,
+    } = outcome;
 
     let mut request_headers = forwardable_headers(&parts.headers);
-    if compiled_request && state.enforce_thinking_check {
-        add_beta(&mut request_headers, THINKING_CHECK_BETA);
-    }
-    if rehydrate_from.is_some() {
-        // Compressed event streams can't be rewritten on the way through.
+    if is_compiled {
+        // Compressed event streams can't be read or rewritten on the way through.
         request_headers.insert(
             header::ACCEPT_ENCODING,
             HeaderValue::from_static("identity"),
         );
+        if state.enforce_thinking_check {
+            add_beta(&mut request_headers, THINKING_CHECK_BETA);
+        }
     }
 
-    let upstream_url = upstream_url(&state.upstream, &parts.uri);
-    let upstream_request = state
-        .client
-        .request(parts.method, &upstream_url)
-        .headers(request_headers)
-        .body(body)
-        .send()
-        .await;
-
-    let upstream_response = match upstream_request {
-        Ok(response) => response,
-        Err(err) => {
-            tracing::warn!(error = %err, url = %upstream_url, "upstream request failed");
-            return error_response(StatusCode::BAD_GATEWAY, "ccc could not reach upstream");
+    let local_response = match local_body {
+        Some(local_body) => send_to_local(&state, &parts, &request_headers, local_body).await,
+        None => None,
+    };
+    let upstream_response = match local_response {
+        Some(response) => response,
+        None => {
+            let upstream_url = upstream_url(&state.upstream, &parts.uri);
+            let sent = state
+                .client
+                .request(parts.method, &upstream_url)
+                .headers(request_headers)
+                .body(body)
+                .send()
+                .await;
+            match sent {
+                Ok(response) => response,
+                Err(err) => {
+                    tracing::warn!(error = %err, url = %upstream_url, "upstream request failed");
+                    return error_response(StatusCode::BAD_GATEWAY, "ccc could not reach upstream");
+                }
+            }
         }
     };
 
@@ -124,70 +144,80 @@ pub(crate) async fn handle(AxumState(state): AxumState<Arc<State>>, request: Req
         }
     });
 
-    let mut response = Response::new(rehydrated_body(stream, &headers, rehydrate_from).await);
+    let mut response = Response::new(processed_body(stream, &headers, plan).await);
     *response.status_mut() = status;
     *response.headers_mut() = headers;
     response
 }
 
-/// Wraps a response body so placeholders become real values before Claude Code sees them.
-async fn rehydrated_body<S>(stream: S, headers: &HeaderMap, vault: Option<Arc<Vault>>) -> Body
-where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
-{
-    let Some(vault) = vault else {
-        return Body::from_stream(stream);
-    };
-    if headers.contains_key(header::CONTENT_ENCODING) {
-        tracing::warn!("upstream compressed a response, so placeholders can't be restored");
-        return Body::from_stream(stream);
+/// Tries the local model. Any failure falls back to the normal upstream, so a local model
+/// that's down, or rejects a request shape, costs a retry rather than the user's turn.
+async fn send_to_local(
+    state: &State,
+    parts: &Parts,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Option<reqwest::Response> {
+    let base = state.local_url.as_ref()?;
+    let mut local_headers = headers.clone();
+    // Anthropic credentials are for Anthropic.
+    for secret in [header::AUTHORIZATION, HeaderName::from_static("x-api-key")] {
+        local_headers.remove(secret);
     }
-    let content_type = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    if content_type.starts_with("text/event-stream") {
-        let rehydrator = Arc::new(Mutex::new(ResponseRehydrator::new(vault)));
-        let finishing = Arc::clone(&rehydrator);
-        let events = stream.map_ok(move |chunk| {
-            Bytes::from(rehydrator.lock().expect("lock poisoned").push(&chunk))
-        });
-        let tail = futures_util::stream::once(async move {
-            Ok(Bytes::from(
-                finishing.lock().expect("lock poisoned").finish(),
-            ))
-        });
-        return Body::from_stream(events.chain(tail));
+    let url = upstream_url(base, &parts.uri);
+    match state
+        .client
+        .request(parts.method.clone(), &url)
+        .headers(local_headers)
+        .body(body)
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => Some(response),
+        Ok(response) => {
+            tracing::warn!(status = %response.status(), "local model refused, using upstream");
+            state.stats.local_fallbacks.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "local model unreachable, using upstream");
+            state.stats.local_fallbacks.fetch_add(1, Ordering::Relaxed);
+            None
+        }
     }
-    if content_type.starts_with("application/json") {
-        let collected: Result<Vec<Bytes>, reqwest::Error> = stream.try_collect().await;
-        return match collected {
-            Ok(chunks) => {
-                let whole = chunks.concat();
-                Body::from(rehydrate_json(&whole, &vault).unwrap_or(whole))
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "upstream response failed partway");
-                Body::from(err.to_string())
-            }
-        };
+}
+
+/// What compiling a request decided.
+struct CompileOutcome {
+    /// The bytes for the normal upstream.
+    body: Bytes,
+    /// The bytes for the local model, if routing chose it.
+    local_body: Option<Bytes>,
+    plan: ResponsePlan,
+}
+
+impl CompileOutcome {
+    fn unchanged(body: Bytes) -> Self {
+        Self {
+            body,
+            local_body: None,
+            plan: ResponsePlan::default(),
+        }
     }
-    Body::from_stream(stream)
 }
 
 fn is_compiled_request(parts: &Parts) -> bool {
     parts.method == Method::POST && COMPILED_PATHS.contains(&parts.uri.path())
 }
 
-/// Runs the pipeline over a request body, returning the bytes to send and the vault to
-/// restore placeholders from, if this conversation is being redacted. Forwards the original
-/// bytes unless a stage actually changed something.
+/// Runs the pipeline over a request body and decides what the response needs. Forwards the
+/// original bytes unless something actually changed.
 async fn compile_body(
     state: &State,
     parts: &Parts,
     body: Bytes,
     exchange: Option<&Exchange>,
-) -> Result<(Bytes, Option<Arc<Vault>>), Box<Response>> {
+) -> Result<CompileOutcome, Box<Response>> {
     let refuse_or_forward = |body: Bytes, why: &str| {
         if state.must_inspect {
             tracing::error!(why, "refusing to send a request the compiler can't read");
@@ -197,7 +227,7 @@ async fn compile_body(
                 &format!("ccc blocked this request: {why}"),
             )));
         }
-        Ok((body, None))
+        Ok(CompileOutcome::unchanged(body))
     };
     if parts.headers.contains_key(header::CONTENT_ENCODING) {
         return refuse_or_forward(body, "its body is compressed");
@@ -213,11 +243,18 @@ async fn compile_body(
         .headers
         .get(SESSION_HEADER)
         .and_then(|value| value.to_str().ok());
-    let context = state.conversations.context_for(session, &parsed);
-    let rehydrate_from = state
+    let mut context = state.conversations.context_for(session, &parsed);
+    let spent_usd = session
+        .zip(state.ledger.as_ref())
+        .and_then(|(session, ledger)| ledger.session_cost(session).ok())
+        .unwrap_or(0.0);
+    // Whole micro-dollars are far finer than any budget, so rounding down is harmless.
+    context.spent_micros = (spent_usd * 1_000_000.0) as u64;
+    let vault = state
         .vault
         .clone()
         .filter(|_| context.enabled.contains(REDACT_STAGE));
+    let original_model = parsed.model().map(str::to_owned);
 
     let compiled = match state.pipeline.compile(parsed, context).await {
         Ok(compiled) => compiled,
@@ -234,17 +271,60 @@ async fn compile_body(
 
     let changed = compiled.changed();
     let mut request = compiled.request;
+    let model = request.model().unwrap_or_default().to_owned();
+    let plan = ResponsePlan {
+        vault,
+        notice: budget_notice_for(state, session, spent_usd),
+        accounting: Some(Accounting {
+            ledger: state.ledger.clone(),
+            session: session.unwrap_or("unknown").to_owned(),
+            model: model.clone(),
+            stats: Arc::clone(&state.stats),
+            noticed: Arc::clone(&state.noticed),
+        }),
+    };
+
     let enforcing = state.enforce_thinking_check && enforce_thinking_check(&mut request);
+
+    // A local model gets its own copy. The upstream copy keeps the model the caller asked
+    // for, ready as the fallback.
+    let local_body = model.strip_prefix(LOCAL_PREFIX).map(|local_model| {
+        let mut local = request.clone();
+        local.set_in_field("model", "", serde_json::json!(local_model));
+        Bytes::from(local.to_bytes())
+    });
+    if local_body.is_some()
+        && let Some(original) = &original_model
+    {
+        request.set_in_field("model", "", serde_json::json!(original));
+    }
+
     if !changed && !enforcing {
         state.stats.record(body.len(), body.len());
-        return Ok((body, rehydrate_from));
+        return Ok(CompileOutcome {
+            body,
+            local_body: None,
+            plan,
+        });
     }
     let rewritten = Bytes::from(request.to_bytes());
     state.stats.record(body.len(), rewritten.len());
     if let Some(exchange) = exchange {
         exchange.record_compiled_body(&rewritten);
     }
-    Ok((rewritten, rehydrate_from))
+    Ok(CompileOutcome {
+        body: rewritten,
+        local_body,
+        plan,
+    })
+}
+
+/// The notice to show, if this session has just gone over budget.
+fn budget_notice_for(state: &State, session: Option<&str>, spent_usd: f64) -> Option<String> {
+    let budget = state.budget_usd?;
+    let session = session?;
+    (spent_usd >= budget && !state.noticed.contains(session))
+        .then(|| budget_notice(spent_usd, budget))
 }
 
 /// Opts a request into the strict history check. Returns whether the request changed;

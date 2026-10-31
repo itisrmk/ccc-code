@@ -6,7 +6,6 @@
 
 mod cache_sim;
 mod checks;
-mod cost;
 mod estimate;
 mod report;
 mod timestamp;
@@ -14,7 +13,7 @@ mod transcript;
 
 pub use checks::{Fidelity, append_only_violations, fidelity};
 pub use report::{ReplayStats, Report, Scenario, replay};
-pub use transcript::{Call, LoadSummary, Session, Usage, load_dir};
+pub use transcript::{Call, LoadSummary, Session, load_dir};
 
 use std::path::PathBuf;
 

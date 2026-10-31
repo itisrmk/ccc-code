@@ -165,7 +165,8 @@ fn identifiers(text: &str) -> HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transcript::{Call, Usage};
+    use crate::transcript::Call;
+    use ccc_ledger::Usage;
     use serde_json::json;
     use std::path::PathBuf;
 
