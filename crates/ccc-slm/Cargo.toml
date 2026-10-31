@@ -1,0 +1,21 @@
+[package]
+name = "ccc-slm"
+description = "A small local model behind a narrow interface, and the stages that use it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+llama = ["dep:llama-cpp-2"]
+
+[dependencies]
+ccc-pipeline.workspace = true
+ccc-wire.workspace = true
+llama-cpp-2 = { version = "0.1", optional = true, default-features = false, features = ["metal"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

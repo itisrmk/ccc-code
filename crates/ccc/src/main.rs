@@ -1,6 +1,10 @@
 //! `ccc`: a local-first prompt compiler for Claude Code.
 
 mod bench;
+#[cfg(feature = "local-model")]
+mod local_models;
+#[cfg(feature = "local-model")]
+mod model_bench;
 mod run;
 
 use std::collections::BTreeSet;
@@ -48,10 +52,13 @@ enum Command {
     Bench(BenchArgs),
     /// Show what recent sessions cost at list prices.
     Stats(StatsArgs),
+    /// Measure a local model on this machine. Needs the local-model build feature.
+    #[cfg(feature = "local-model")]
+    ModelBench(ModelBenchArgs),
 }
 
 #[derive(Debug, Args)]
-struct ProxyArgs {
+pub(crate) struct ProxyArgs {
     /// Base URL to forward to. Defaults to the Anthropic API.
     #[arg(long, env = "ANTHROPIC_BASE_URL", default_value = DEFAULT_UPSTREAM)]
     upstream: String,
@@ -88,6 +95,24 @@ struct ProxyArgs {
     /// context to that model's cache and drops thinking the new model can't read.
     #[arg(long, value_name = "MODEL", requires = "budget_usd")]
     budget_downshift: Option<String>,
+    /// Label user turns with this GGUF model. Off by default: no decision depends on the
+    /// labels yet, and on an M2 Pro a 4B model takes about 170 ms per turn.
+    #[cfg(feature = "local-model")]
+    #[arg(long, value_name = "FILE")]
+    pub(crate) classify_model: Option<PathBuf>,
+    /// Give up on a label after this many milliseconds.
+    #[cfg(feature = "local-model")]
+    #[arg(long, value_name = "MS", default_value_t = 80)]
+    pub(crate) classify_cap_ms: u64,
+    /// Let this GGUF model choose lines to keep from large tool output. Turns itself off at
+    /// startup if the model is too slow for --prune-model-cap-ms.
+    #[cfg(feature = "local-model")]
+    #[arg(long, value_name = "FILE")]
+    pub(crate) prune_model: Option<PathBuf>,
+    /// How long the prune model may hold up a request.
+    #[cfg(feature = "local-model")]
+    #[arg(long, value_name = "MS", default_value_t = 600)]
+    pub(crate) prune_model_cap_ms: u64,
     /// Have the API reject any edit to history behind a thinking block. For testing: this
     /// is already the default for accounts created on or after 2026-08-31.
     #[arg(long)]
@@ -124,16 +149,24 @@ impl ProxyArgs {
         if self.no_prune {
             disabled_stages.insert(prune.name().to_owned());
         }
+        // Secrets go first among the stages that edit, so nothing later handles or logs a
+        // real value. Labelling stays on this machine, so it can read them.
+        let mut stages: Vec<Arc<dyn Stage>> = Vec::new();
+        #[cfg(feature = "local-model")]
+        let local = local_models::load(self, state_dir.as_deref())?;
+        #[cfg(feature = "local-model")]
+        stages.extend(local.classify);
+        stages.push(Arc::new(StripNotices));
+        stages.push(Arc::new(redact));
+        stages.push(Arc::new(prune));
+        #[cfg(feature = "local-model")]
+        stages.extend(local.prune);
+        stages.push(Arc::new(route));
+
         let config = ProxyConfig {
             upstream: self.upstream.clone(),
             dump_dir: self.dump.clone(),
-            // Secrets go first, so nothing later handles or logs a real value.
-            pipeline: Pipeline::new(vec![
-                Arc::new(StripNotices),
-                Arc::new(redact),
-                Arc::new(prune),
-                Arc::new(route),
-            ]),
+            pipeline: Pipeline::new(stages),
             disabled_stages,
             state_dir,
             vault: Some(vault),
@@ -205,6 +238,17 @@ struct BenchArgs {
     transcripts: PathBuf,
 }
 
+#[cfg(feature = "local-model")]
+#[derive(Debug, Args)]
+struct ModelBenchArgs {
+    /// A GGUF model file.
+    #[arg(value_name = "FILE")]
+    model: PathBuf,
+    /// Transcripts to take real tool output from, normally ~/.claude/projects.
+    #[arg(long, value_name = "DIR")]
+    transcripts: Option<PathBuf>,
+}
+
 #[derive(Debug, Args)]
 struct StatsArgs {
     /// How many recent sessions to show.
@@ -226,6 +270,11 @@ async fn main() -> anyhow::Result<ExitCode> {
         Command::Serve(args) => {
             init_logging(&args.proxy, LogDefault::Stderr)?;
             serve(args).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        #[cfg(feature = "local-model")]
+        Command::ModelBench(args) => {
+            model_bench::run(&args.model, args.transcripts.as_deref())?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Stats(args) => {

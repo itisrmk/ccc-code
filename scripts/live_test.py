@@ -308,6 +308,76 @@ def scenario_downshift(box):
     return f"models over the session: {models}"
 
 
+MODELS = Path.home() / ".ccc" / "models"
+LABEL_MODEL = MODELS / "Qwen3-4B-Q4_K_M.gguf"
+
+
+def has_local_model():
+    """Whether this binary was built with local models and the weights are downloaded."""
+    built = subprocess.run([str(CCC), "--help"], capture_output=True, text=True)
+    return "model-bench" in built.stdout and LABEL_MODEL.exists()
+
+
+def scenario_local_model(box):
+    """Real weights on the request path. Kept lines must be verbatim, and history valid."""
+    if not has_local_model():
+        return "SKIPPED: needs --features local-model and the 4B weights"
+    source = ""
+    for i in range(60):
+        source += f"/// Computes item {i}.\npub fn item_{i}(value: u32) -> u32 {{\n"
+        for j in range(5):
+            source += f"    let step_{j} = value + {i * j};\n"
+        source += "    step_4\n}\n"
+    (box.work / "big.rs").write_text(source)
+    result = run_headless(
+        box,
+        "One tool call at a time, with Bash. 1) Run 'cat big.rs'. 2) Think carefully and work "
+        "out 37*43 by hand. 3) Run 'echo RESULT' using your answer. 4) Reply with only done.",
+        ccc_extra=(
+            "--classify-model", str(LABEL_MODEL), "--classify-cap-ms", "5000",
+            "--prune-model", str(LABEL_MODEL), "--prune-model-cap-ms", "120000",
+        ),
+    )
+    check(not result["is_error"], f"task errored: {result.get('result')}")
+    exchanges = box.exchanges()
+    assert_all_accepted(exchanges)
+    fired = {rule for exchange in exchanges for rule in exchange["rules"]}
+    decisions = [path.read_text()[:300] for path in (box.state / "model-decisions").glob("*.json")]
+    check("model" in fired, f"the model step made no edit: {fired}, decisions {decisions}")
+    original = set(source.splitlines())
+    for message in exchanges[-1]["sent"]["messages"]:
+        if not isinstance(message["content"], list):
+            continue
+        for block in message["content"]:
+            content = block.get("content")
+            if block.get("type") == "tool_result" and isinstance(content, str) and "fn item_" in content:
+                for line in content.splitlines():
+                    check(
+                        line in original or line.startswith("[ccc:"),
+                        f"the model paraphrased a line: {line!r}",
+                    )
+    return f"{len(exchanges)} requests accepted under enforcement, kept lines verbatim"
+
+
+def scenario_slow_model_floor(box):
+    """At the default cap this machine's model is too slow, so the stage must turn itself off."""
+    if not has_local_model():
+        return "SKIPPED: needs --features local-model and the 4B weights"
+    source = "".join(f"fn item_{i}(value: u32) -> u32 {{ value + {i} }}\n" for i in range(420))
+    (box.work / "big.rs").write_text(source)
+    started = time.time()
+    result = run_headless(
+        box,
+        "Run 'cat big.rs' with Bash, then reply with only done.",
+        ccc_extra=("--prune-model", str(LABEL_MODEL)),
+    )
+    check(not result["is_error"], f"task errored: {result.get('result')}")
+    exchanges = box.exchanges()
+    fired = {rule for exchange in exchanges for rule in exchange["rules"]}
+    check("model" not in fired, f"a too-slow model step ran anyway: {fired}")
+    return f"stage stayed off, task finished in {time.time() - started:.0f}s"
+
+
 class Terminal:
     """A real terminal session in a private tmux server, read as a rendered screen."""
 

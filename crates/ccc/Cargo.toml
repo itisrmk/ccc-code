@@ -10,6 +10,9 @@ publish.workspace = true
 name = "ccc"
 path = "src/main.rs"
 
+[features]
+local-model = ["ccc-slm/llama"]
+
 [dependencies]
 anyhow.workspace = true
 ccc-bench.workspace = true
@@ -19,6 +22,7 @@ ccc-proxy.workspace = true
 ccc-prune.workspace = true
 ccc-redact.workspace = true
 ccc-route.workspace = true
+ccc-slm.workspace = true
 ccc-wire.workspace = true
 clap.workspace = true
 serde_json.workspace = true

@@ -16,6 +16,7 @@ ccc-proxy = { path = "crates/ccc-proxy" }
 ccc-prune = { path = "crates/ccc-prune" }
 ccc-redact = { path = "crates/ccc-redact" }
 ccc-route = { path = "crates/ccc-route" }
+ccc-slm = { path = "crates/ccc-slm" }
 ccc-wire = { path = "crates/ccc-wire" }
 
 anyhow = "1"

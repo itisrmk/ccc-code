@@ -21,7 +21,7 @@ Run these after every change. Add a line to the log below for each phase or real
 | `target/release/ccc bench ~/.claude/projects` | Replays real transcripts: token and cost effect per scenario, append-only violations, fidelity, stage latency | Free, offline |
 | `scripts/live_test.py` | Real Claude Code through `ccc` under strict thinking enforcement | About $0.02 on Haiku |
 
-Build first with `cargo build --release -p ccc`. `CCC_LIVE_MODEL=claude-opus-5-5` runs the live tests on another model; it costs about $0.20 per scenario for the first cache write.
+Build first with `cargo build --release -p ccc --features local-model`, so the local model scenarios can run. They skip themselves without the feature or the weights in `~/.ccc/models`. `ccc model-bench FILE --transcripts DIR` measures a model on this machine. `CCC_LIVE_MODEL=claude-opus-5-5` runs the live tests on another model; it costs about $0.20 per scenario for the first cache write.
 
 Live scenarios (`scripts/live_test.py --list`):
 
@@ -30,6 +30,8 @@ Live scenarios (`scripts/live_test.py --list`):
 - `enforcement`: control proving an edit to sent history is rejected
 - `budget`: the ledger matches Claude Code's reported cost, and a notice is shown then stripped
 - `downshift`: an explicit budget downshift changes the model without a history error
+- `local_model`: real weights on the request path, with kept lines verbatim and history valid
+- `slow_model_floor`: a model too slow for its cap turns its stage off
 - `interactive`: the full-screen TUI in a real terminal via tmux
 
 ## Log
@@ -38,6 +40,9 @@ Newest first. Record what was tested, what happened and any real finding. Number
 
 ### 2026-10-30
 
+- Gate 2 passed: the full default pipeline adds 2 ms at p95 on a 1 MB request, 11 ms at 4 MB and 46 ms at 16 MB, under the 150 ms limit (`overhead` test, M2 Pro, 16 GB). Other machine classes unmeasured.
+- Phase 5 measured on real weights (`ccc model-bench`, 22 hand-labelled requests): Qwen3-0.6B took 101 ms at p50 with 5/22 intents right, so the spec's model isn't accurate enough. Qwen3-4B took 173 ms with 20/22 intents and 18/22 difficulties right, but misses the 80 ms cap. Few-shot examples and prompt prefix caching made that difference; the first attempt had 4/22. Blob pruning takes 14.5 s at p50 against a 600 ms cap (373 tokens/s), so it can't run at the spec's cap on this machine. Both stay off by default; the blob stage also disables itself at startup if the model is too slow for its cap.
+- Phase 5 bugs found running real weights: `sample()` already advances the grammar, so a second `accept` crashed; Metal aborts at exit unless the worker thread is joined; an answer cut off at the token limit failed strict parsing and was thrown away.
 - Phase 4: `ccc stats` ledger, route rules, budget notice, budget downshift, local model route. Live runs found two bugs the unit tests missed. The final `message_delta` repeats cache writes without their lifetimes, which double-counted them and overstated cost by 56%. A notice at the end of a response replaced the answer in `claude -p`, which reports only the last text block, so it now goes first. Local route tested against a fake server only; Ollama isn't installed.
 - Measured: Claude Code already sends background title calls to Haiku, so the background route rarely saves anything and stays off by default. A `max_tokens: 1` startup `quota` probe can get a 429 from the API with no edits by `ccc`; the live tests tolerate that one probe only.
 - Goal set: finish Phases 4-8 with automated tests, logged here.
