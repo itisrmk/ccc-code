@@ -5,9 +5,11 @@
 //! calls with no meaningful cached prefix, unless a budget downshift is explicitly enabled.
 
 mod classify;
+mod learned;
 mod notice;
 mod route;
 
 pub use classify::{CallKind, classify};
+pub use learned::{LearnedRoute, TextClassifier, cross_validate};
 pub use notice::{NoticeInjector, StripNotices, budget_notice};
 pub use route::{LOCAL_PREFIX, Route, RouteRules};

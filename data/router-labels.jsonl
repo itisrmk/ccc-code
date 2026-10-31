@@ -1,0 +1,60 @@
+{"prompt": "fix the typo in the error message", "cheap_enough": true}
+{"prompt": "rename the variable count to total", "cheap_enough": true}
+{"prompt": "add a comment explaining this constant", "cheap_enough": true}
+{"prompt": "update the version number in package.json", "cheap_enough": true}
+{"prompt": "remove the unused import in main", "cheap_enough": true}
+{"prompt": "change the default timeout to 30 seconds", "cheap_enough": true}
+{"prompt": "format this file with prettier", "cheap_enough": true}
+{"prompt": "what does this flag do", "cheap_enough": true}
+{"prompt": "list the files in the src directory", "cheap_enough": true}
+{"prompt": "add a newline at the end of the file", "cheap_enough": true}
+{"prompt": "bump the dependency to the latest patch", "cheap_enough": true}
+{"prompt": "delete the commented out code here", "cheap_enough": true}
+{"prompt": "capitalize the heading in the docs", "cheap_enough": true}
+{"prompt": "show me the last five commits", "cheap_enough": true}
+{"prompt": "add this folder to gitignore", "cheap_enough": true}
+{"prompt": "make the button label say Save", "cheap_enough": true}
+{"prompt": "fix the broken link in the readme", "cheap_enough": true}
+{"prompt": "add a log line when the server starts", "cheap_enough": true}
+{"prompt": "where is the config file loaded", "cheap_enough": true}
+{"prompt": "sort these imports", "cheap_enough": true}
+{"prompt": "change the color of the header to blue", "cheap_enough": true}
+{"prompt": "add an example to the docstring", "cheap_enough": true}
+{"prompt": "rename this test to match the function", "cheap_enough": true}
+{"prompt": "run the linter and fix the warnings", "cheap_enough": true}
+{"prompt": "add a missing semicolon on line 40", "cheap_enough": true}
+{"prompt": "update the copyright year", "cheap_enough": true}
+{"prompt": "what does this error code mean", "cheap_enough": true}
+{"prompt": "add the new env var to the sample file", "cheap_enough": true}
+{"prompt": "convert this var to const", "cheap_enough": true}
+{"prompt": "add a simple unit test for the add function", "cheap_enough": true}
+{"prompt": "redesign the authentication system to support multiple tenants", "cheap_enough": false}
+{"prompt": "migrate the database from postgres to a sharded setup", "cheap_enough": false}
+{"prompt": "track down the race condition in the job scheduler", "cheap_enough": false}
+{"prompt": "rewrite the rendering engine for incremental updates", "cheap_enough": false}
+{"prompt": "find out why memory keeps growing in production", "cheap_enough": false}
+{"prompt": "design a plugin architecture with sandboxing", "cheap_enough": false}
+{"prompt": "port the whole service from python to rust", "cheap_enough": false}
+{"prompt": "make the payment flow safe against double charges and retries", "cheap_enough": false}
+{"prompt": "refactor the monolith into separate deployable services", "cheap_enough": false}
+{"prompt": "diagnose the intermittent deadlock between workers under load", "cheap_enough": false}
+{"prompt": "implement end to end encryption for stored documents", "cheap_enough": false}
+{"prompt": "add distributed tracing across every service", "cheap_enough": false}
+{"prompt": "work out why the benchmarks regressed since last quarter", "cheap_enough": false}
+{"prompt": "build a query planner for the new storage layer", "cheap_enough": false}
+{"prompt": "audit the codebase for injection vulnerabilities and fix them", "cheap_enough": false}
+{"prompt": "introduce zero downtime schema migrations", "cheap_enough": false}
+{"prompt": "replace the custom orm throughout the application", "cheap_enough": false}
+{"prompt": "fix the consistency bug in our replication protocol", "cheap_enough": false}
+{"prompt": "add offline sync with conflict resolution to the app", "cheap_enough": false}
+{"prompt": "optimize the hot path allocations across the compiler", "cheap_enough": false}
+{"prompt": "restructure the state management across the entire frontend", "cheap_enough": false}
+{"prompt": "implement rate limiting that works across regions", "cheap_enough": false}
+{"prompt": "the system corrupts data after failover, find the root cause", "cheap_enough": false}
+{"prompt": "create a migration path for the legacy api clients", "cheap_enough": false}
+{"prompt": "rebuild the search index pipeline for streaming updates", "cheap_enough": false}
+{"prompt": "reduce p99 latency across the request path by half", "cheap_enough": false}
+{"prompt": "add multi region failover to the storage service", "cheap_enough": false}
+{"prompt": "evaluate and adopt a new concurrency model for the server", "cheap_enough": false}
+{"prompt": "rewrite the parser to support error recovery and incremental parsing", "cheap_enough": false}
+{"prompt": "make the build system hermetic across all platforms", "cheap_enough": false}

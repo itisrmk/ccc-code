@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -366,6 +367,117 @@ def scenario_hooks(box):
     return f"hooks fired: {sorted(seen)}, index built, cost logged"
 
 
+def scenario_names(box):
+    """Names only a model can spot stay local and come back real."""
+    model_dir = Path.home() / ".ccc" / "models" / "gliner"
+    built = subprocess.run([str(CCC), "--help"], capture_output=True, text=True)
+    if "ner-bench" not in built.stdout or not model_dir.exists():
+        return "SKIPPED: needs --features ner and the GLiNER model"
+    name = "Maria Gonzalez"
+    result = run_headless(
+        box,
+        f"Our customer {name} at Northwind Traders needs a reply. Run 'echo noted' with Bash, "
+        "then reply with only the customer's full name, exactly as I wrote it.",
+        ccc_extra=("--ner-model", str(model_dir)),
+    )
+    check(name in result["result"], f"the real name didn't come back: {result['result']!r}")
+    exchanges = box.exchanges()
+    assert_all_accepted(exchanges, require_thinking=False)
+    for index, exchange in enumerate(exchanges):
+        check(name.encode() not in exchange["sent_bytes"], f"request {index} sent the name")
+    return f"{len(exchanges)} requests, name stayed local and came back real"
+
+
+def scenario_learned_router(box):
+    """A trained router really moves an easy conversation down and keeps it there."""
+    router = box.base / "router.json"
+    trained = subprocess.run(
+        [str(CCC), "router-train", str(ROOT / "data" / "router-labels.jsonl"), "--out", str(router)],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    result = run_headless(
+        box,
+        "Fix the typo: run 'echo hello' with Bash, then reply with only the word done.",
+        ccc_extra=(
+            "--learned-router", str(router),
+            "--router-cheap-model", "claude-haiku-5-5",
+            "--router-confidence", "0.5",
+        ),
+        model="claude-sonnet-5-5",
+    )
+    check(not result["is_error"], f"task errored: {result.get('result')}")
+    exchanges = box.exchanges()
+    assert_all_accepted(exchanges, require_thinking=False)
+    agent_calls = [e for e in exchanges if e["sent"].get("tools")]
+    models = {exchange["sent"]["model"] for exchange in agent_calls}
+    check(models == {"claude-haiku-5-5"}, f"expected every agent call on Haiku, saw {models}")
+    return f"{len(agent_calls)} agent calls all on Haiku; {trained.strip()}"
+
+
+def scenario_policy(box):
+    """A team policy refuses a run that breaks it, before any traffic moves."""
+    policy = box.base / "policy.toml"
+    policy.write_text('require_redact = true\nredact_rules = ["Project Bluebird"]\n')
+    refused = subprocess.run(
+        [str(CCC), "run", "--policy", str(policy), "--no-redact", "--state-dir", str(box.state),
+         "--", "true"],
+        capture_output=True, text=True,
+    )
+    check(refused.returncode != 0, "a run breaking the policy was allowed")
+    check("--no-redact" in refused.stderr, f"unclear refusal: {refused.stderr[-300:]}")
+
+    result = run_headless(
+        box,
+        "Our codename is Project Bluebird. Reply with only that codename, exactly as written.",
+        ccc_extra=("--policy", str(policy)),
+    )
+    check("Project Bluebird" in result["result"], f"not restored: {result['result']!r}")
+    for index, exchange in enumerate(box.exchanges()):
+        check(b"Project Bluebird" not in exchange["sent_bytes"], f"request {index} sent the codename")
+    return "refused --no-redact; policy rule redacted a codename and restored it"
+
+
+def scenario_dashboard(box):
+    """The dashboard serves the ledger's sessions on loopback."""
+    result = run_headless(box, "Reply with only the word done.")
+    port = 34000 + (os.getpid() % 1000)
+    server = subprocess.Popen(
+        [str(CCC), "dashboard", "--listen", f"127.0.0.1:{port}", "--state-dir", str(box.state)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        page = ""
+        deadline = time.time() + 10
+        while time.time() < deadline and not page:
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=2) as response:
+                    page = response.read().decode()
+            except OSError:
+                time.sleep(0.2)
+    finally:
+        server.terminate()
+        server.wait()
+    check(result["session_id"] in page, f"session missing from dashboard: {page[:300]}")
+    return "served the session just recorded"
+
+
+def scenario_codex(box):
+    """Codex answers through the proxy. Opt in: it spends ChatGPT quota, not Claude's."""
+    if not os.environ.get("CCC_LIVE_CODEX"):
+        return "SKIPPED: set CCC_LIVE_CODEX=1 to spend a little ChatGPT quota"
+    done = subprocess.run(
+        [str(CCC), "run", "--state-dir", str(box.state), "--dump", str(box.dump),
+         "--upstream", "https://chatgpt.com/backend-api/codex", "--",
+         "codex", "exec", "--skip-git-repo-check", "Reply with only the word ok"],
+        cwd=box.work, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180,
+    )
+    check(done.returncode == 0, f"exit {done.returncode}: {done.stderr[-300:]}")
+    check("ok" in done.stdout.lower(), f"no answer: {done.stdout[-200:]}")
+    check("unchanged" in done.stderr, "no notice that traffic isn't compiled")
+    check(any(box.dump.glob("*.req-head.json")), "no traffic went through ccc")
+    return "Codex answered through the proxy, with the forwarding notice shown"
+
+
 MODELS = Path.home() / ".ccc" / "models"
 LABEL_MODEL = MODELS / "Qwen3-4B-Q4_K_M.gguf"
 
@@ -515,6 +627,18 @@ def scenario_interactive(box):
     return f"TUI answered through ccc, {len(exchanges)} requests accepted, rules {sorted(fired)}"
 
 
+def forget_transcripts(base):
+    """Removes transcripts Claude Code wrote for this run's throwaway directories, so test
+    sessions don't end up in the user's history or in `ccc bench` results."""
+    projects = Path.home() / ".claude" / "projects"
+    marker = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(base))
+    if not projects.is_dir():
+        return
+    for project in projects.iterdir():
+        if marker in project.name:
+            shutil.rmtree(project, ignore_errors=True)
+
+
 def main():
     scenarios = {
         name[len("scenario_") :]: value
@@ -540,6 +664,7 @@ def main():
         except (Failed, subprocess.TimeoutExpired, ValueError, KeyError) as err:
             failures += 1
             print(f"FAIL {name}: {err}")
+    forget_transcripts(base)
     shutil.rmtree(base, ignore_errors=True)
     print(f"{len(chosen) - failures} of {len(chosen)} scenarios passed")
     return 1 if failures else 0

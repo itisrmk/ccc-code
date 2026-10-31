@@ -87,7 +87,7 @@ impl Stage for Route {
 
 /// Whether `to` is strictly less capable than `from`, judged by tier. A model whose tier
 /// isn't known is never moved, and nothing moves to an unknown tier unless it's local.
-fn is_downgrade(from: &str, to: &str) -> bool {
+pub(crate) fn is_downgrade(from: &str, to: &str) -> bool {
     let Some(from_tier) = tier(from) else {
         return false;
     };

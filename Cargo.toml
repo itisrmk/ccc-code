@@ -7,6 +7,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 publish = false
+license = "MIT"
 
 [workspace.dependencies]
 ccc-bench = { path = "crates/ccc-bench" }
@@ -14,6 +15,7 @@ ccc-enrich = { path = "crates/ccc-enrich" }
 ccc-index = { path = "crates/ccc-index" }
 ccc-learn = { path = "crates/ccc-learn" }
 ccc-ledger = { path = "crates/ccc-ledger" }
+ccc-ner = { path = "crates/ccc-ner" }
 ccc-pipeline = { path = "crates/ccc-pipeline" }
 ccc-proxy = { path = "crates/ccc-proxy" }
 ccc-prune = { path = "crates/ccc-prune" }

@@ -1,6 +1,8 @@
 //! `ccc`: a local-first prompt compiler for Claude Code.
 
 mod bench;
+mod clients;
+mod dashboard;
 mod export;
 mod hooks;
 mod learn;
@@ -8,6 +10,10 @@ mod learn;
 mod local_models;
 #[cfg(feature = "local-model")]
 mod model_bench;
+#[cfg(feature = "ner")]
+mod names;
+mod policy;
+mod router;
 mod run;
 
 use std::collections::BTreeSet;
@@ -18,6 +24,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use crate::clients::Client;
 use anyhow::Context;
 use ccc_enrich::{Enrich, EnrichConfig, GateConfig, Suggester};
 use ccc_index::Index;
@@ -71,6 +78,13 @@ enum Command {
     HookSettings(StateArgs),
     /// Handle a Claude Code hook. Called by Claude Code, not by hand.
     Hook(HookArgs),
+    /// Train the learned router from labelled requests, and report its held-out accuracy.
+    RouterTrain(RouterTrainArgs),
+    /// Serve a page of recent sessions' costs on this machine.
+    Dashboard(DashboardArgs),
+    /// Measure the name-detection model on files in a directory. Needs the ner build feature.
+    #[cfg(feature = "ner")]
+    NerBench(NerBenchArgs),
     /// Measure a local model on this machine. Needs the local-model build feature.
     #[cfg(feature = "local-model")]
     ModelBench(ModelBenchArgs),
@@ -78,7 +92,8 @@ enum Command {
 
 #[derive(Debug, Args)]
 pub(crate) struct ProxyArgs {
-    /// Base URL to forward to. Defaults to the Anthropic API.
+    /// Base URL to forward to. Defaults to the Anthropic API, or the client's own service
+    /// when `run` launches another client.
     #[arg(long, env = "ANTHROPIC_BASE_URL", default_value = DEFAULT_UPSTREAM)]
     upstream: String,
     /// Copy all traffic to this directory. Holds real prompts and tool output.
@@ -132,6 +147,24 @@ pub(crate) struct ProxyArgs {
     #[cfg(feature = "local-model")]
     #[arg(long, value_name = "MS", default_value_t = 600)]
     pub(crate) prune_model_cap_ms: u64,
+    /// Also redact names of people and organizations, with the GLiNER model in this directory.
+    /// Off by default: it's far slower than the regex tier and flags some code.
+    #[cfg(feature = "ner")]
+    #[arg(long, value_name = "DIR")]
+    ner_model: Option<PathBuf>,
+    /// Start conversations on --router-cheap-model when this trained model is confident
+    /// that's enough. Off by default; see `ccc router-train`.
+    #[arg(long, value_name = "FILE", requires = "router_cheap_model")]
+    learned_router: Option<PathBuf>,
+    /// The cheaper model for --learned-router.
+    #[arg(long, value_name = "MODEL")]
+    router_cheap_model: Option<String>,
+    /// How sure the learned router must be, from 0 to 1.
+    #[arg(long, value_name = "P", default_value_t = 0.9)]
+    router_confidence: f64,
+    /// Team rules to enforce. Defaults to .ccc/policy.toml in the current directory, if present.
+    #[arg(long, value_name = "FILE")]
+    policy: Option<PathBuf>,
     /// Suggest likely relevant files on each user turn, from this directory's index and
     /// `ccc learn`. Off by default: it spends tokens on every turn.
     #[arg(long)]
@@ -150,12 +183,23 @@ pub(crate) struct ProxyArgs {
 
 impl ProxyArgs {
     fn proxy(&self) -> anyhow::Result<Proxy> {
+        let policy = policy::load(self.policy.as_deref())?;
+        if let Some(policy) = &policy {
+            policy
+                .check(&self.settings())
+                .context("this run breaks the team policy")?;
+        }
         let state_dir = self.state_dir.clone().or_else(default_state_dir);
         let vault = Arc::new(match &state_dir {
             Some(dir) => Vault::open(&dir.join("redact.key")).context("opening redaction key")?,
             None => Vault::ephemeral().context("creating redaction key")?,
         });
-        let redact = Redact::new(self.detector()?, Arc::clone(&vault));
+        let extra_rules = policy
+            .as_ref()
+            .map_or(&[][..], |policy| policy.redact_rules());
+        let redact = Redact::new(self.detector(extra_rules)?, Arc::clone(&vault));
+        #[cfg(feature = "ner")]
+        let redact = names::add_tier(redact, self.ner_model.as_deref(), state_dir.as_deref())?;
         let prune = Prune::new();
 
         let route = Route::new(RouteRules {
@@ -192,6 +236,17 @@ impl ProxyArgs {
                 .as_deref()
                 .context("--enrich needs a state directory")?;
             stages.push(Arc::new(enrich_stage(dir, self.enrich_cap_ms)?));
+        }
+        if let Some(path) = &self.learned_router {
+            let dir = state_dir
+                .as_deref()
+                .context("--learned-router needs a state directory")?;
+            stages.push(Arc::new(router::stage(
+                path,
+                self.router_cheap_model.clone().unwrap_or_default(),
+                self.router_confidence,
+                dir,
+            )?));
         }
         stages.push(Arc::new(route));
 
@@ -246,7 +301,17 @@ fn default_state_dir() -> Option<PathBuf> {
 }
 
 impl ProxyArgs {
-    fn detector(&self) -> anyhow::Result<Detector> {
+    fn settings(&self) -> policy::RunSettings<'_> {
+        policy::RunSettings {
+            redact: !self.no_redact,
+            prune: !self.no_prune,
+            dump: self.dump.is_some(),
+            upstream: &self.upstream,
+            budget_usd: self.budget_usd,
+        }
+    }
+
+    fn detector(&self, extra_rules: &[String]) -> anyhow::Result<Detector> {
         let path = self
             .redact_rules
             .clone()
@@ -266,6 +331,7 @@ impl ProxyArgs {
             .map(str::trim)
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
             .map(str::to_owned)
+            .chain(extra_rules.iter().cloned())
             .collect();
         Detector::with_project_rules(&patterns)
             .with_context(|| format!("reading rules from {}", path.display()))
@@ -321,6 +387,25 @@ impl StateArgs {
 }
 
 #[derive(Debug, Args)]
+struct RouterTrainArgs {
+    /// Labelled requests: JSON lines with `prompt` and `cheap_enough`.
+    #[arg(value_name = "FILE")]
+    labels: PathBuf,
+    /// Where to write the trained model.
+    #[arg(long, value_name = "FILE")]
+    out: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct DashboardArgs {
+    /// Address to listen on. Stays on loopback unless you change it.
+    #[arg(long, default_value = "127.0.0.1:3457")]
+    listen: SocketAddr,
+    #[command(flatten)]
+    state: StateArgs,
+}
+
+#[derive(Debug, Args)]
 struct LearnArgs {
     /// Directory of Claude Code transcripts, normally ~/.claude/projects.
     #[arg(value_name = "DIR")]
@@ -354,6 +439,17 @@ struct HookArgs {
     state: StateArgs,
 }
 
+#[cfg(feature = "ner")]
+#[derive(Debug, Args)]
+struct NerBenchArgs {
+    /// The directory holding the GLiNER model.
+    #[arg(value_name = "MODEL_DIR")]
+    model: PathBuf,
+    /// Files to scan, recursively.
+    #[arg(value_name = "DIR")]
+    files: PathBuf,
+}
+
 #[cfg(feature = "local-model")]
 #[derive(Debug, Args)]
 struct ModelBenchArgs {
@@ -378,19 +474,38 @@ struct StatsArgs {
 #[tokio::main]
 async fn main() -> anyhow::Result<ExitCode> {
     match Cli::parse().command {
-        Command::Run(args) => {
+        Command::Run(mut args) => {
             // `run` shares the terminal with a full-screen app, so stderr is off limits.
             init_logging(&args.proxy, LogDefault::Silent)?;
-            run::run(args.proxy.proxy()?, &args.command, args.stats).await
+            let client = Client::for_command(&args.command);
+            if args.proxy.upstream == DEFAULT_UPSTREAM {
+                client
+                    .default_upstream()
+                    .clone_into(&mut args.proxy.upstream);
+            }
+            run::run(args.proxy.proxy()?, client, &args.command, args.stats).await
         }
         Command::Serve(args) => {
             init_logging(&args.proxy, LogDefault::Stderr)?;
             serve(args).await?;
             Ok(ExitCode::SUCCESS)
         }
+        #[cfg(feature = "ner")]
+        Command::NerBench(args) => {
+            names::bench(&args.model, &args.files)?;
+            Ok(ExitCode::SUCCESS)
+        }
         #[cfg(feature = "local-model")]
         Command::ModelBench(args) => {
             model_bench::run(&args.model, args.transcripts.as_deref())?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::RouterTrain(args) => {
+            router::train(&args.labels, &args.out)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Dashboard(args) => {
+            dashboard::serve(args.listen, &args.state.dir()?).await?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Learn(args) => {

@@ -1,0 +1,18 @@
+[package]
+name = "ccc-ner"
+description = "Finds names of people and organizations with a GLiNER model on ONNX Runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+ort = "=2.0.0-rc.13"
+ndarray = "0.17"
+regex.workspace = true
+thiserror.workspace = true
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+
+[lints]
+workspace = true

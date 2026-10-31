@@ -11,12 +11,15 @@ use tokio::process::Command;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::oneshot;
 
+use crate::clients::Client;
+
 /// Added to a signal number to form a shell-style exit code.
 const SIGNAL_EXIT_BASE: i32 = 128;
 
-/// Runs `command` with `ANTHROPIC_BASE_URL` pointing at `proxy`, returning its exit code.
+/// Runs `command` pointed at `proxy`, returning its exit code.
 pub(crate) async fn run(
     proxy: Proxy,
+    client: Client,
     command: &[String],
     show_stats: bool,
 ) -> anyhow::Result<ExitCode> {
@@ -36,9 +39,13 @@ pub(crate) async fn run(
         let _ = stopped.await;
     }));
 
-    let mut child = Command::new(program)
+    if let Some(notice) = client.notice() {
+        writeln!(std::io::stderr(), "{notice}").context("printing a notice")?;
+    }
+    let mut command = Command::new(program);
+    client.configure(&mut command, address);
+    let mut child = command
         .args(args)
-        .env("ANTHROPIC_BASE_URL", format!("http://{address}"))
         .kill_on_drop(true)
         .spawn()
         .with_context(|| format!("starting {program}"))?;

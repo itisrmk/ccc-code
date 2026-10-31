@@ -21,7 +21,7 @@ Run these after every change. Add a line to the log below for each phase or real
 | `target/release/ccc bench ~/.claude/projects` | Replays real transcripts: token and cost effect per scenario, append-only violations, fidelity, stage latency | Free, offline |
 | `scripts/live_test.py` | Real Claude Code through `ccc` under strict thinking enforcement | About $0.02 on Haiku |
 
-Build first with `cargo build --release -p ccc --features local-model`, so the local model scenarios can run. They skip themselves without the feature or the weights in `~/.ccc/models`. `ccc model-bench FILE --transcripts DIR` measures a model on this machine. `CCC_LIVE_MODEL=claude-opus-5-5` runs the live tests on another model; it costs about $0.20 per scenario for the first cache write.
+Build first with `cargo build --release -p ccc --features local-model,ner`, so the model scenarios can run. They skip themselves without the feature or the weights in `~/.ccc/models`, fetched with `scripts/fetch-models.sh`. `ccc model-bench FILE --transcripts DIR` measures a model on this machine. `CCC_LIVE_MODEL=claude-opus-5-5` runs the live tests on another model; it costs about $0.20 per scenario for the first cache write.
 
 `scripts/e2e.py` measures task success (Gate 3): real Claude Code fixing small synthetic bugs with and without `ccc`, scored by running the tests afterward. About $0.02 per run on Haiku and $0.15 on Sonnet. `--check-tasks` confirms each task starts out failing, free.
 
@@ -34,6 +34,11 @@ Live scenarios (`scripts/live_test.py --list`):
 - `downshift`: an explicit budget downshift changes the model without a history error
 - `enrich`: hints reach the model and stay stable across turns and a resume
 - `hooks`: hooks registered through settings fire, build an index and log cost
+- `names`: a name only a model can spot stays local and comes back real
+- `learned_router`: a trained router moves an easy conversation down and keeps it there
+- `policy`: a team policy refuses a run that breaks it, and its rules apply
+- `dashboard`: the dashboard serves the ledger's sessions
+- `codex`: Codex through the proxy; opt in with `CCC_LIVE_CODEX=1`, since it spends ChatGPT quota
 - `local_model`: real weights on the request path, with kept lines verbatim and history valid
 - `slow_model_floor`: a model too slow for its cap turns its stage off
 - `interactive`: the full-screen TUI in a real terminal via tmux
@@ -44,6 +49,11 @@ Newest first. Record what was tested, what happened and any real finding. Number
 
 ### 2026-10-30
 
+- Final run on the finished binary: `scripts/check.sh` passed with 237 tests, all 15 live scenarios passed including Codex and the interactive TUI, and `scripts/e2e.py --reps 1` passed 15/15 in all three configurations. Proxy overhead 0.5 ms at p95; full pipeline 2, 11 and 47 ms at 1, 4 and 16 MB.
+- Gate 3, task success, scored by running tests afterward: Haiku standard tasks 48/48 without `ccc`, 48/48 with, 48/48 with `--enrich`. Haiku adversarial tasks, where the key line has no failure keyword, 23/24 and 23/24. Sonnet 14/15 and 14/15. No difference, but 87 runs per side can't establish "within 1 point", and these are small synthetic tasks, not SWE-bench. Treat the gate as not contradicted rather than proven.
+- Test runs polluted `~/.claude/projects` with 262 throwaway sessions, which moved the bench's cache-write error from 11.6% to 23%. Removed those and made both harnesses clean up after themselves. Always check `files read` in bench output.
+- Phase 8: learned router (68.3% held-out on 60 labelled requests, against 50.0% for guessing; a mechanism on thin data, off by default), team policy, Codex and Gemini forwarding, local dashboard. Codex tested live: it tries a WebSocket, gets a 405 and falls back to HTTP. Gemini CLI isn't installed, so only its environment variable is tested. A hosted dashboard wasn't built, since it was optional and hosting means publishing.
+- Phase 7, names: GLiNER takes 140 ms at p50 per 2,000 characters against the spec's 20 ms. On this repo's source it flagged `self`, `name`, `root` and `decisions`, and replacing those would wreck everything the model reads, so only multi-word capitalized names count. Single-word names belong in project rules.
 - Phase 7, suggestions: `ccc enrich-eval` on real history, using only what came before each prompt: past sessions hit a touched file at 3 suggestions 42.6% of the time at 28.3% precision, the index alone 20.0% at 11.5%, both 44.8% at 25.6%. Enrich stays opt-in.
 - Phase 7, docs check: a `PreCompact` hook can only read or block, so it can't feed a summary as the spec wanted. Learned context goes through `SessionStart`, which also fires with `source: compact`.
 - Terms: Claude Code's compliance page says third-party developers may not route requests through Free, Pro, Max or Ultra credentials on behalf of their users, or intermediate those credentials. Affects distributing `ccc`, not building it. See README.

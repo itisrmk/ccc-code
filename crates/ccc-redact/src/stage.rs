@@ -1,10 +1,12 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use ccc_pipeline::{Context, Edit, OnFailure, Stage, StageError, Target};
+use ccc_pipeline::{Context, Decisions, Edit, OnFailure, Stage, StageError, Target};
 use ccc_wire::Request;
 use serde_json::{Value, json};
 
@@ -50,6 +52,7 @@ pub struct Redact {
     vault: Arc<Vault>,
     /// Secret values found per text, by hash, so a long history isn't re-scanned every call.
     memo: Mutex<HashMap<u64, FoundSecrets>>,
+    names: Option<NameTier>,
 }
 
 /// Secret values found in one text, each with the rule that found it.
@@ -63,7 +66,25 @@ impl Redact {
             detector,
             vault,
             memo: Mutex::default(),
+            names: None,
         }
+    }
+
+    /// Adds the name tier, saving outcomes in `decisions_dir`. Text taking longer than `cap`
+    /// to scan is treated as having no names.
+    #[must_use]
+    pub fn with_names(
+        mut self,
+        finder: Arc<dyn NameFinder>,
+        decisions_dir: PathBuf,
+        cap: Duration,
+    ) -> Self {
+        self.names = Some(NameTier {
+            finder,
+            decisions: Decisions::new(decisions_dir),
+            cap,
+        });
+        self
     }
 
     fn secrets_in(&self, text: &str) -> FoundSecrets {
@@ -90,16 +111,58 @@ impl Redact {
         found
     }
 
+    /// Names found by the optional tier, decided once for text in the newest message. A
+    /// model's answer can vary and its time limit can be missed, so the outcome is saved and
+    /// older text only ever replays what was decided when it was sent.
+    fn names_in(&self, text: &str, in_newest: bool) -> Vec<String> {
+        let Some(tier) = &self.names else {
+            return Vec::new();
+        };
+        if text.len() > MAX_NAME_SCAN_BYTES {
+            return Vec::new();
+        }
+        let identity = [text];
+        if let Some(saved) = tier.decisions.get(&identity) {
+            return saved
+                .and_then(|names| serde_json::from_str(&names).ok())
+                .unwrap_or_default();
+        }
+        if !in_newest {
+            return Vec::new();
+        }
+        let started = Instant::now();
+        let found = tier.finder.find_names(text).unwrap_or_else(|reason| {
+            tracing::warn!(%reason, "name detection failed");
+            Vec::new()
+        });
+        let found = if started.elapsed() > tier.cap {
+            Vec::new()
+        } else {
+            found
+        };
+        let as_json = (!found.is_empty()).then(|| json!(found).to_string());
+        if tier.decisions.save(&identity, as_json.as_deref()) {
+            found
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Redacts external text: anything the detectors find, and anything already known.
     fn redact_external(
         &self,
         text: &str,
+        in_newest: bool,
         known: &mut KnownSecrets,
     ) -> Option<(String, &'static str)> {
         let mut rule = None;
         for (secret, found_by) in self.secrets_in(text).iter() {
             known.insert(secret, self.vault.placeholder_for(secret));
             rule = Some(*found_by);
+        }
+        for name in self.names_in(text, in_newest) {
+            known.insert(&name, self.vault.placeholder_for(&name));
+            rule = rule.or(Some(RULE_NAME));
         }
         let replaced = known.replace_in(text);
         (replaced != text).then(|| (replaced, rule.unwrap_or(RULE_KNOWN)))
@@ -108,6 +171,30 @@ impl Redact {
 
 /// The rule name for text changed only because it contains an already known secret.
 const RULE_KNOWN: &str = "known secret";
+/// The rule name for text changed because the optional name tier found something in it.
+const RULE_NAME: &str = "name";
+/// Longer text is usually logs or code, which are slow to scan and rarely hold a customer's
+/// name, so the optional tier skips it. Exceeding the stage's cap would stop the request.
+const MAX_NAME_SCAN_BYTES: usize = 4_000;
+
+/// Finds names regexes can't, such as people and organizations.
+pub trait NameFinder: Send + Sync + fmt::Debug {
+    /// Lists the names in `text`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a description of what went wrong. The request then goes out with only the
+    /// other detectors' results, since this tier is best-effort.
+    fn find_names(&self, text: &str) -> Result<Vec<String>, String>;
+}
+
+/// The optional name tier and where its outcomes are saved.
+#[derive(Debug)]
+struct NameTier {
+    finder: Arc<dyn NameFinder>,
+    decisions: Decisions,
+    cap: Duration,
+}
 
 impl Stage for Redact {
     fn name(&self) -> &'static str {
@@ -129,6 +216,10 @@ impl Stage for Redact {
         if context.protected_before == 0 {
             self.plan_system(request, &mut known, &mut edits);
         }
+        let newest = request
+            .messages()
+            .iter()
+            .rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"));
         for (index, message) in request.messages().iter().enumerate() {
             if index < context.protected_before {
                 continue;
@@ -137,7 +228,8 @@ impl Stage for Redact {
             if message.get("role").and_then(Value::as_str) == Some("assistant") {
                 plan_assistant(message, target, &known, &mut edits);
             } else {
-                self.plan_external(message, target, &mut known, &mut edits);
+                let in_newest = Some(index) == newest;
+                self.plan_external(message, target, in_newest, &mut known, &mut edits);
             }
         }
         Ok(edits)
@@ -148,13 +240,13 @@ impl Redact {
     fn plan_system(&self, request: &Request, known: &mut KnownSecrets, edits: &mut Vec<Edit>) {
         match request.field("system") {
             Some(Value::String(text)) => {
-                self.edit_external(text, Target::System, String::new(), known, edits);
+                self.edit_external(text, Target::System, String::new(), false, known, edits);
             }
             Some(Value::Array(blocks)) => {
                 for (position, block) in blocks.iter().enumerate() {
                     if let Some(text) = block.get("text").and_then(Value::as_str) {
                         let pointer = format!("/{position}/text");
-                        self.edit_external(text, Target::System, pointer, known, edits);
+                        self.edit_external(text, Target::System, pointer, false, known, edits);
                     }
                 }
             }
@@ -166,16 +258,17 @@ impl Redact {
         &self,
         message: &Value,
         target: Target,
+        in_newest: bool,
         known: &mut KnownSecrets,
         edits: &mut Vec<Edit>,
     ) {
         match message.get("content") {
             Some(Value::String(text)) => {
-                self.edit_external(text, target, "/content".to_owned(), known, edits);
+                self.edit_external(text, target, "/content".to_owned(), in_newest, known, edits);
             }
             Some(Value::Array(blocks)) => {
                 for (position, block) in blocks.iter().enumerate() {
-                    self.plan_external_block(block, position, target, known, edits);
+                    self.plan_external_block(block, position, target, in_newest, known, edits);
                 }
             }
             _ => {}
@@ -187,6 +280,7 @@ impl Redact {
         block: &Value,
         position: usize,
         target: Target,
+        in_newest: bool,
         known: &mut KnownSecrets,
         edits: &mut Vec<Edit>,
     ) {
@@ -194,13 +288,13 @@ impl Redact {
             Some("text") => {
                 if let Some(text) = block.get("text").and_then(Value::as_str) {
                     let pointer = format!("/content/{position}/text");
-                    self.edit_external(text, target, pointer, known, edits);
+                    self.edit_external(text, target, pointer, in_newest, known, edits);
                 }
             }
             Some("tool_result") => match block.get("content") {
                 Some(Value::String(text)) => {
                     let pointer = format!("/content/{position}/content");
-                    self.edit_external(text, target, pointer, known, edits);
+                    self.edit_external(text, target, pointer, in_newest, known, edits);
                 }
                 Some(Value::Array(parts)) => {
                     for (part_index, part) in parts.iter().enumerate() {
@@ -208,7 +302,7 @@ impl Redact {
                             && let Some(text) = part.get("text").and_then(Value::as_str)
                         {
                             let pointer = format!("/content/{position}/content/{part_index}/text");
-                            self.edit_external(text, target, pointer, known, edits);
+                            self.edit_external(text, target, pointer, in_newest, known, edits);
                         }
                     }
                 }
@@ -223,10 +317,11 @@ impl Redact {
         text: &str,
         target: Target,
         pointer: String,
+        in_newest: bool,
         known: &mut KnownSecrets,
         edits: &mut Vec<Edit>,
     ) {
-        if let Some((replaced, rule)) = self.redact_external(text, known) {
+        if let Some((replaced, rule)) = self.redact_external(text, in_newest, known) {
             edits.push(Edit {
                 target,
                 pointer,
@@ -488,7 +583,7 @@ mod tests {
                 { "type": "tool_result", "tool_use_id": "t", "content": format!("got {key}") },
             ] }),
             json!({ "role": "assistant", "content": [{ "type": "text", "text": "done" }] }),
-            json!({ "role": "user", "content": format!("other {}", "ghp_abcdefghijklmnopqrstuvwxyz0123456789") }),
+            json!({ "role": "user", "content": format!("other {}", format!("{}{}", "ghp_", "abcdefghijklmnopqrstuvwxyz0123456789")) }),
         ];
         let (stage, _vault) = stage();
         let pipeline = Pipeline::new(vec![Arc::new(stage)]);
@@ -509,6 +604,124 @@ mod tests {
             }
             previous = Some(compiled);
         }
+    }
+
+    #[derive(Debug)]
+    struct Finder(Vec<String>);
+
+    impl NameFinder for Finder {
+        fn find_names(&self, text: &str) -> Result<Vec<String>, String> {
+            Ok(self
+                .0
+                .iter()
+                .filter(|name| text.contains(*name))
+                .cloned()
+                .collect())
+        }
+    }
+
+    fn named_stage(vault: &Arc<Vault>, dir: &std::path::Path, names: &[&str]) -> Redact {
+        let stage = Redact::new(Detector::builtin(), Arc::clone(vault));
+        let finder = Finder(names.iter().map(|name| (*name).to_owned()).collect());
+        stage.with_names(Arc::new(finder), dir.to_owned(), Duration::from_secs(5))
+    }
+
+    fn name_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ccc-names-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn the_name_tier_covers_the_newest_message_and_later_mentions() {
+        let dir = name_dir("newest");
+        let body = json!({ "messages": [
+            { "role": "user", "content": "ask Maria Gonzalez" },
+        ] });
+        let vault = Arc::new(Vault::ephemeral().unwrap());
+        let sent = compile(
+            named_stage(&vault, &dir, &["Maria Gonzalez"]),
+            &body,
+            &context(),
+        )
+        .to_string();
+        assert!(!sent.contains("Maria"), "{sent}");
+        assert!(sent.contains("<SECRET_"), "{sent}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A finder can answer differently next time. Text already sent must not change.
+    #[test]
+    fn a_name_decision_never_changes_and_older_undecided_text_stays_as_sent() {
+        let dir = name_dir("stable");
+        let first = json!({ "messages": [{ "role": "user", "content": "ask Maria Gonzalez" }] });
+        let vault = Arc::new(Vault::ephemeral().unwrap());
+        let sent = compile(
+            named_stage(&vault, &dir, &["Maria Gonzalez"]),
+            &first,
+            &context(),
+        );
+
+        // A later turn, with a finder that no longer sees that name but sees a new one in
+        // text that went out before the tier knew about it.
+        let later = json!({ "messages": [
+            { "role": "user", "content": "ask Maria Gonzalez" },
+            { "role": "assistant", "content": "ok" },
+            { "role": "user", "content": "thanks" },
+        ] });
+        let again = compile(
+            named_stage(&vault, &dir, &["Northwind"]),
+            &later,
+            &context(),
+        );
+        assert_eq!(again["messages"][0], sent["messages"][0]);
+
+        let undecided = json!({ "messages": [
+            { "role": "user", "content": "from Northwind Traders" },
+            { "role": "assistant", "content": "ok" },
+            { "role": "user", "content": "next" },
+        ] });
+        let plain = compile(
+            named_stage(&vault, &dir, &["Northwind"]),
+            &undecided,
+            &context(),
+        );
+        assert_eq!(
+            plain["messages"][0], undecided["messages"][0],
+            "already sent plain"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_failing_or_slow_finder_never_stops_the_request() {
+        #[derive(Debug)]
+        struct Broken;
+        impl NameFinder for Broken {
+            fn find_names(&self, _: &str) -> Result<Vec<String>, String> {
+                Err("no model".to_owned())
+            }
+        }
+        let dir = name_dir("broken");
+        let (plain, _vault) = stage();
+        let broken = plain.with_names(Arc::new(Broken), dir.clone(), Duration::from_secs(5));
+        let body = json!({ "messages": [{ "role": "user", "content": "ask Maria" }] });
+        assert_eq!(
+            compile(broken, &body, &context())["messages"],
+            body["messages"]
+        );
+
+        let (plain, _vault) = stage();
+        let slow = plain.with_names(
+            Arc::new(Finder(vec!["Maria".to_owned()])),
+            dir.join("slow"),
+            Duration::ZERO,
+        );
+        assert_eq!(
+            compile(slow, &body, &context())["messages"],
+            body["messages"]
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

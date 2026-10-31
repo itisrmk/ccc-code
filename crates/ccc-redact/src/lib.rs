@@ -17,5 +17,5 @@ mod vault;
 
 pub use detect::{Detector, InvalidRuleError};
 pub use rehydrate::{ResponseRehydrator, rehydrate_json};
-pub use stage::Redact;
+pub use stage::{NameFinder, Redact};
 pub use vault::{OpenVaultError, Vault};

@@ -15,6 +15,8 @@ $0.02 per run on Haiku and $0.15 on Sonnet at list prices.
 
 import argparse
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -24,7 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-CCC = ROOT / "target" / "release" / "ccc"
+CCC = Path(os.environ.get("CCC_BIN", ROOT / "target" / "release" / "ccc"))
 NOISE_CASES = 300
 PROMPT = (
     "The tests in this directory are failing. Run them with 'python3 run_tests.py', find the "
@@ -123,7 +125,7 @@ def split(line):
             current += character
     return fields
 """,
-        "test_csvline.py": """\
+        "test_csvline.py": '''\
 from csvline import split
 
 def test_plain():
@@ -137,7 +139,7 @@ def test_escaped_quote():
 
 def test_empty_fields():
     assert split("a,,") == ["a", "", ""]
-""",
+''',
     },
     "lru_cache": {
         "lru.py": """\
@@ -427,6 +429,80 @@ def test_cancel_keeps_the_rest_in_order():
     },
 }
 
+# Built so pruning could plausibly hurt: the line that matters is in the middle of long output
+# and contains none of the words the log rule looks for. A pass needs the model to notice the
+# omission marker and look again.
+TASKS["quiet_row"] = {
+    "run_tests.py": """\
+import sys
+from table import value
+differing = 0
+for row in range(400):
+    want = row * 3 if row != 217 else 650
+    got = value(row)
+    if got == want:
+        print(f"row {row}: {got} matches")
+    else:
+        differing += 1
+        print(f"row {row}: {got} vs {want}")
+print(f"{differing} rows differ")
+sys.exit(1 if differing else 0)
+""",
+    "table.py": """\
+def value(row):
+    return row * 3
+""",
+}
+TASKS["quiet_build"] = {
+    "run_tests.py": """\
+import sys
+import build
+for step in range(350):
+    print(f"compiling unit_{step}.o with cc -O2 -c unit_{step}.c -o unit_{step}.o")
+    if step == 170:
+        message = build.check()
+        if message:
+            print("note: " + message)
+            print("stopping after this batch")
+            stopped = True
+print("done" if not build.check() else "build stopped")
+sys.exit(1 if build.check() else 0)
+""",
+    "build.py": """\
+LIMIT = 16
+
+def check():
+    if LIMIT % 10 != 0:
+        return f"LIMIT is {LIMIT} but must be a multiple of 10 in build.py"
+    return ""
+""",
+}
+TASKS["far_hit"] = {
+    "run_tests.py": """\
+import glob, importlib, sys
+sys.path.insert(0, ".")
+wrong = 0
+for path in sorted(glob.glob("mod_*.py")):
+    module = importlib.import_module(path[:-3])
+    if module.total([1, 2, 3]) != 6:
+        wrong += 1
+print(f"{wrong} modules compute the wrong total")
+sys.exit(1 if wrong else 0)
+""",
+    **{
+        f"mod_{i:03d}.py": (
+            "def legacy_sum(items, start=0):\n    return sum(items, start)\n\n"
+            "def total(items):\n"
+            + (
+                "    return legacy_sum(items, 1)\n"
+                if i == 137
+                else "    return legacy_sum(items, 0)\n"
+            )
+        )
+        for i in range(160)
+    },
+}
+
 CONFIGS = {
     "baseline": None,
     "ccc": [],
@@ -443,14 +519,18 @@ def set_up(task, base):
     return work
 
 
+def is_protected(name):
+    return name.startswith("test_") or name == "run_tests.py"
+
+
 def protected_files_intact(task, work):
     """Passing doesn't count if the tests or their runner were changed."""
-    if (work / "run_tests.py").read_text() != RUN_TESTS:
-        return False
+    expected = dict(TASKS[task])
+    expected.setdefault("run_tests.py", RUN_TESTS)
     return all(
         (work / name).read_text() == content
-        for name, content in TASKS[task].items()
-        if name.startswith("test_")
+        for name, content in expected.items()
+        if is_protected(name)
     )
 
 
@@ -496,6 +576,18 @@ def run_once(job):
     return record
 
 
+def forget_transcripts(base):
+    """Removes transcripts Claude Code wrote for this run's throwaway directories, so test
+    sessions don't end up in the user's history or in `ccc bench` results."""
+    projects = Path.home() / ".claude" / "projects"
+    marker = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(base))
+    if not projects.is_dir():
+        return
+    for project in projects.iterdir():
+        if marker in project.name:
+            shutil.rmtree(project, ignore_errors=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="claude-haiku-5-5")
@@ -534,6 +626,7 @@ def main():
                 f"turns {record.get('turns')}  ${record.get('cost_usd') or 0:.4f}",
                 flush=True,
             )
+    forget_transcripts(base)
     shutil.rmtree(base, ignore_errors=True)
 
     print(f"\n{args.model}, {args.reps} repetitions of {len(args.tasks)} tasks")
