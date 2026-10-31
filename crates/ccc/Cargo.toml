@@ -16,6 +16,9 @@ local-model = ["ccc-slm/llama"]
 [dependencies]
 anyhow.workspace = true
 ccc-bench.workspace = true
+ccc-enrich.workspace = true
+ccc-index.workspace = true
+ccc-learn.workspace = true
 ccc-ledger.workspace = true
 ccc-pipeline.workspace = true
 ccc-proxy.workspace = true

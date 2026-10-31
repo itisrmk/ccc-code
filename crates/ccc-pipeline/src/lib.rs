@@ -5,8 +5,10 @@
 //! changed. Edits to history the server has already seen are refused here regardless of
 //! what a stage asks for, because they would invalidate signed thinking blocks.
 
+mod decisions;
 mod stage;
 
+pub use decisions::Decisions;
 pub use stage::{
     CompileError, Compiled, Context, Edit, OnFailure, Pipeline, Stage, StageError, StageOutcome,
     StageTrace, Target,

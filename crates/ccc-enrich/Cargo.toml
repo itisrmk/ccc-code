@@ -1,0 +1,19 @@
+[package]
+name = "ccc-enrich"
+description = "Adds likely relevant files to user turns, with an optional gated rewrite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ccc-index.workspace = true
+ccc-learn.workspace = true
+ccc-pipeline.workspace = true
+ccc-slm.workspace = true
+ccc-wire.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

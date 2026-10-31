@@ -308,6 +308,64 @@ def scenario_downshift(box):
     return f"models over the session: {models}"
 
 
+def scenario_enrich(box):
+    """Hints reach the model, stay byte-stable across turns, and survive a resume."""
+    (box.work / "src").mkdir()
+    (box.work / "src" / "tokens.py").write_text(
+        "def verify_token(value):\n    return value == 'ok'\n"
+    )
+    (box.work / "src" / "billing.py").write_text("def charge_card():\n    return 1\n")
+    first = run_headless(
+        box,
+        "Think carefully and work out 37*43 by hand. Run 'echo RESULT' with Bash using your "
+        "answer. Then, without opening any files, tell me which source file you were told may "
+        "relate to verifying a token. Reply with only that path.",
+        ccc_extra=("--enrich",),
+    )
+    check("tokens.py" in first["result"], f"the hint didn't arrive: {first['result']!r}")
+    second = run_headless(
+        box,
+        "Think carefully and work out 41*47 by hand. Run 'echo RESULT' with Bash using your "
+        "answer, then 'echo again' with Bash, then reply with only the word finished.",
+        "--resume",
+        first["session_id"],
+        ccc_extra=("--enrich",),
+    )
+    check("finished" in second["result"].lower(), f"resume failed: {second['result']!r}")
+    exchanges = box.exchanges()
+    assert_all_accepted(exchanges)
+    fired = {rule for exchange in exchanges for rule in exchange["rules"]}
+    check("enrich" in fired, f"enrich never fired: {fired}")
+    return f"{len(exchanges)} requests accepted under enforcement, hint reached the model"
+
+
+def scenario_hooks(box):
+    """Hooks registered through settings really fire, and log the session's cost."""
+    settings = subprocess.run(
+        [str(CCC), "hook-settings", "--state-dir", str(box.state)],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    settings_file = box.base / "settings.json"
+    settings_file.write_text(settings)
+    result = run_headless(
+        box, "Reply with only the word done.", "--settings", str(settings_file)
+    )
+    check(not result["is_error"], f"task errored: {result.get('result')}")
+    log = box.state / "hooks.log"
+    check(log.exists(), "no hook ever ran")
+    events = [json.loads(line) for line in log.read_text().splitlines()]
+    seen = {event["event"] for event in events}
+    check({"session-start", "stop"} <= seen, f"expected start and stop hooks, saw {seen}")
+    deadline = time.time() + 10
+    index_dir = box.state / "index"
+    while time.time() < deadline and not any(index_dir.glob("*.json")):
+        time.sleep(0.25)
+    check(any(index_dir.glob("*.json")), "the start hook didn't build an index")
+    turns = (box.state / "turns.log").read_text()
+    check(result["session_id"] in turns, f"the stop hook logged no cost: {turns}")
+    return f"hooks fired: {sorted(seen)}, index built, cost logged"
+
+
 MODELS = Path.home() / ".ccc" / "models"
 LABEL_MODEL = MODELS / "Qwen3-4B-Q4_K_M.gguf"
 

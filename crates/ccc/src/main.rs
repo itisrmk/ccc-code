@@ -1,6 +1,9 @@
 //! `ccc`: a local-first prompt compiler for Claude Code.
 
 mod bench;
+mod export;
+mod hooks;
+mod learn;
 #[cfg(feature = "local-model")]
 mod local_models;
 #[cfg(feature = "local-model")]
@@ -16,6 +19,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::Context;
+use ccc_enrich::{Enrich, EnrichConfig, GateConfig, Suggester};
+use ccc_index::Index;
+use ccc_learn::Memory;
 use ccc_ledger::Ledger;
 use ccc_pipeline::{Pipeline, Stage};
 use ccc_proxy::{Proxy, ProxyConfig};
@@ -26,8 +32,11 @@ use clap::{Args, Parser, Subcommand};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
+/// How often to pick up changed files while running.
+const INDEX_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The usage record, inside the state directory.
-const LEDGER_FILE: &str = "ledger.sqlite";
+pub(crate) const LEDGER_FILE: &str = "ledger.sqlite";
 
 /// Project redaction rules, relative to the directory `ccc` runs in.
 const DEFAULT_REDACT_RULES: &str = ".ccc/redact-rules";
@@ -52,6 +61,16 @@ enum Command {
     Bench(BenchArgs),
     /// Show what recent sessions cost at list prices.
     Stats(StatsArgs),
+    /// Learn which files past work needed, from local transcripts. Nothing leaves the machine.
+    Learn(LearnArgs),
+    /// Build or refresh a repository's symbol index.
+    Index(IndexArgs),
+    /// Judge file suggestions against what past work really touched.
+    EnrichEval(EnrichEvalArgs),
+    /// Print the settings that register ccc's hooks, for `claude --settings`.
+    HookSettings(StateArgs),
+    /// Handle a Claude Code hook. Called by Claude Code, not by hand.
+    Hook(HookArgs),
     /// Measure a local model on this machine. Needs the local-model build feature.
     #[cfg(feature = "local-model")]
     ModelBench(ModelBenchArgs),
@@ -113,6 +132,13 @@ pub(crate) struct ProxyArgs {
     #[cfg(feature = "local-model")]
     #[arg(long, value_name = "MS", default_value_t = 600)]
     pub(crate) prune_model_cap_ms: u64,
+    /// Suggest likely relevant files on each user turn, from this directory's index and
+    /// `ccc learn`. Off by default: it spends tokens on every turn.
+    #[arg(long)]
+    enrich: bool,
+    /// How long suggesting may hold up a request.
+    #[arg(long, value_name = "MS", default_value_t = 400)]
+    enrich_cap_ms: u64,
     /// Have the API reject any edit to history behind a thinking block. For testing: this
     /// is already the default for accounts created on or after 2026-08-31.
     #[arg(long)]
@@ -161,6 +187,12 @@ impl ProxyArgs {
         stages.push(Arc::new(prune));
         #[cfg(feature = "local-model")]
         stages.extend(local.prune);
+        if self.enrich {
+            let dir = state_dir
+                .as_deref()
+                .context("--enrich needs a state directory")?;
+            stages.push(Arc::new(enrich_stage(dir, self.enrich_cap_ms)?));
+        }
         stages.push(Arc::new(route));
 
         let config = ProxyConfig {
@@ -177,6 +209,36 @@ impl ProxyArgs {
         };
         Proxy::new(config).context("configuring proxy")
     }
+}
+
+/// Sets up Enrich for the current directory, keeping its index fresh in the background.
+fn enrich_stage(state_dir: &std::path::Path, cap_ms: u64) -> anyhow::Result<Enrich> {
+    let root = std::env::current_dir().context("finding the current directory")?;
+    let cache = learn::index_cache_path(state_dir, &root);
+    let memory = Memory::open(&learn::memory_path(state_dir)).context("opening memory")?;
+    let suggester = Arc::new(Suggester::new(
+        root,
+        Index::load(&cache),
+        Some(Arc::new(memory)),
+    ));
+    suggester.refresh();
+    let refreshing = Arc::clone(&suggester);
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(INDEX_REFRESH_INTERVAL);
+            refreshing.refresh();
+        }
+    });
+    let config = EnrichConfig {
+        decisions_dir: state_dir.join("enrich-decisions"),
+        time_cap: std::time::Duration::from_millis(cap_ms),
+        rewrite_log: Some(state_dir.join("enrich-rewrites.jsonl")),
+        gate: GateConfig {
+            min_similarity: 0.6,
+            classify_deadline: std::time::Duration::from_millis(cap_ms),
+        },
+    };
+    Ok(Enrich::new(suggester, None, config))
 }
 
 fn default_state_dir() -> Option<PathBuf> {
@@ -236,6 +298,60 @@ struct BenchArgs {
     /// Directory of Claude Code transcripts, normally ~/.claude/projects.
     #[arg(value_name = "DIR")]
     transcripts: PathBuf,
+    /// Also write the results as numbers only, to read and share if you choose. Holds no
+    /// prompts, paths, output or session ids, and nothing is sent anywhere.
+    #[arg(long, value_name = "FILE")]
+    export: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct StateArgs {
+    /// Where per-conversation state lives. Defaults to ~/.ccc.
+    #[arg(long, value_name = "DIR")]
+    state_dir: Option<PathBuf>,
+}
+
+impl StateArgs {
+    fn dir(&self) -> anyhow::Result<PathBuf> {
+        self.state_dir
+            .clone()
+            .or_else(default_state_dir)
+            .context("no state directory: set --state-dir or HOME")
+    }
+}
+
+#[derive(Debug, Args)]
+struct LearnArgs {
+    /// Directory of Claude Code transcripts, normally ~/.claude/projects.
+    #[arg(value_name = "DIR")]
+    transcripts: PathBuf,
+    #[command(flatten)]
+    state: StateArgs,
+}
+
+#[derive(Debug, Args)]
+struct IndexArgs {
+    /// The repository to index.
+    #[arg(value_name = "DIR", default_value = ".")]
+    root: PathBuf,
+    #[command(flatten)]
+    state: StateArgs,
+}
+
+#[derive(Debug, Args)]
+struct EnrichEvalArgs {
+    /// Directory of Claude Code transcripts, normally ~/.claude/projects.
+    #[arg(value_name = "DIR")]
+    transcripts: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct HookArgs {
+    /// Which event fired: session-start, pre-compact or stop.
+    #[arg(value_name = "EVENT")]
+    event: String,
+    #[command(flatten)]
+    state: StateArgs,
 }
 
 #[cfg(feature = "local-model")]
@@ -277,12 +393,35 @@ async fn main() -> anyhow::Result<ExitCode> {
             model_bench::run(&args.model, args.transcripts.as_deref())?;
             Ok(ExitCode::SUCCESS)
         }
+        Command::Learn(args) => {
+            learn::learn(&args.state.dir()?, &args.transcripts)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Index(args) => {
+            let root = args.root.canonicalize().context("finding the repository")?;
+            learn::index(&args.state.dir()?, &root)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::EnrichEval(args) => {
+            learn::enrich_eval(&args.transcripts)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::HookSettings(args) => {
+            let ccc = std::env::current_exe().context("finding this program")?;
+            let settings = hooks::settings_json(&ccc, &args.dir()?);
+            writeln!(std::io::stdout(), "{settings}")?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Hook(args) => {
+            hooks::handle(&args.event, &args.state.dir()?)?;
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Stats(args) => {
             stats(&args)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Bench(args) => {
-            bench::run(&args.transcripts)?;
+            bench::run(&args.transcripts, args.export.as_deref())?;
             Ok(ExitCode::SUCCESS)
         }
     }

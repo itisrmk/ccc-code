@@ -8,14 +8,11 @@
 //! goes out, including "leave it alone" when the model is too slow. Older results replay
 //! their saved decision and are never computed fresh.
 
-use std::collections::hash_map::DefaultHasher;
-use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ccc_pipeline::{Context, Edit, OnFailure, Stage, StageError, Target};
+use ccc_pipeline::{Context, Decisions, Edit, OnFailure, Stage, StageError, Target};
 use ccc_wire::{Request, text_of_tool_result};
 use serde_json::{Value, json};
 
@@ -56,6 +53,7 @@ pub struct BlobPruneConfig {
 #[derive(Debug)]
 pub struct BlobPrune {
     model: Arc<dyn TextModel>,
+    decisions: Decisions,
     config: BlobPruneConfig,
 }
 
@@ -63,38 +61,12 @@ impl BlobPrune {
     /// A stage using `model`.
     #[must_use]
     pub fn new(model: Arc<dyn TextModel>, config: BlobPruneConfig) -> Self {
-        Self { model, config }
-    }
-
-    fn decision_path(&self, id: &str, text: &str) -> PathBuf {
-        let mut hasher = DefaultHasher::new();
-        id.hash(&mut hasher);
-        text.hash(&mut hasher);
-        self.config
-            .decisions_dir
-            .join(format!("{:016x}.json", hasher.finish()))
-    }
-
-    fn saved_decision(&self, path: &PathBuf) -> Option<Option<String>> {
-        let stored: Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
-        Some(
-            stored
-                .get("kept")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-        )
-    }
-
-    /// Writes a decision down. If it can't be saved, it must not be used either, because a
-    /// later request couldn't reproduce it.
-    fn save_decision(&self, path: &PathBuf, kept: Option<&str>) -> bool {
-        let record = json!({ "kept": kept }).to_string();
-        let saved =
-            fs::create_dir_all(&self.config.decisions_dir).and_then(|()| fs::write(path, record));
-        if let Err(err) = &saved {
-            tracing::warn!(error = %err, "could not save a model decision");
+        let decisions = Decisions::new(config.decisions_dir.clone());
+        Self {
+            model,
+            decisions,
+            config,
         }
-        saved.is_ok()
     }
 
     /// Asks the model what to keep. Any problem, including slowness, means keep everything.
@@ -173,13 +145,13 @@ impl Stage for BlobPrune {
                 if text.len() < self.config.min_bytes || text.len() > self.config.max_bytes {
                     continue;
                 }
-                let path = self.decision_path(id, &text);
-                let kept = match self.saved_decision(&path) {
+                let identity = [id, text.as_ref()];
+                let kept = match self.decisions.get(&identity) {
                     Some(saved) => saved,
                     None if Some(index) == newest_user => {
                         let decided = self.decide(&text);
                         // A decision that can't be saved couldn't be repeated, so it's void.
-                        if self.save_decision(&path, decided.as_deref()) {
+                        if self.decisions.save(&identity, decided.as_deref()) {
                             decided
                         } else {
                             None
@@ -303,6 +275,7 @@ mod tests {
     use super::*;
     use crate::classify::tests::Fixed;
     use crate::model::Completion;
+    use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn long_output() -> String {

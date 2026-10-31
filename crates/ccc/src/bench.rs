@@ -17,7 +17,7 @@ use serde_json::Value;
 
 type CompileFn<'a> = Box<dyn Fn(&Request) -> Request + 'a>;
 
-pub(crate) fn run(transcripts: &Path) -> anyhow::Result<()> {
+pub(crate) fn run(transcripts: &Path, export: Option<&Path>) -> anyhow::Result<()> {
     let (sessions, summary) = ccc_bench::load_dir(transcripts)
         .with_context(|| format!("loading transcripts from {}", transcripts.display()))?;
 
@@ -81,6 +81,15 @@ pub(crate) fn run(transcripts: &Path) -> anyhow::Result<()> {
 
     let report = ccc_bench::replay(&sessions, summary, &scenarios);
     writeln!(out, "{report}").context("writing report")?;
+    if let Some(path) = export {
+        crate::export::write(&report, path)?;
+        writeln!(
+            out,
+            "\nWrote numbers only to {}. Nothing was sent.",
+            path.display()
+        )
+        .context("writing report")?;
+    }
 
     writeln!(out, "\nRedaction on real transcripts").context("writing report")?;
     let vault = Arc::new(Vault::ephemeral().context("creating redaction key")?);

@@ -3,3 +3,6 @@
 # Traffic dumps contain real prompts, code and possibly secrets.
 /dumps
 *.dump
+
+# Local end-to-end results.
+e2e-results*.jsonl

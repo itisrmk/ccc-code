@@ -90,6 +90,24 @@ impl Report {
         &self.scenarios[0]
     }
 
+    /// Stats for every scenario, the baseline first.
+    #[must_use]
+    pub fn scenarios(&self) -> &[ReplayStats] {
+        &self.scenarios
+    }
+
+    /// How many sessions were replayed.
+    #[must_use]
+    pub fn session_count(&self) -> usize {
+        self.sessions
+    }
+
+    /// How many calls were replayed.
+    #[must_use]
+    pub fn call_count(&self) -> usize {
+        self.calls
+    }
+
     /// Stats for the scenario called `name`, if it was run.
     #[must_use]
     pub fn scenario(&self, name: &str) -> Option<&ReplayStats> {
