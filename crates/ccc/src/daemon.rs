@@ -25,6 +25,8 @@ const SOCKET: &str = "daemon.sock";
 /// How long with nothing to do before giving the memory back.
 pub(crate) const DEFAULT_IDLE: Duration = Duration::from_secs(10 * 60);
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
+/// How long a real service gets to answer before its socket counts as abandoned.
+const LIVENESS_TIMEOUT: Duration = Duration::from_millis(500);
 /// Time for a freshly started service to open its socket. Models load later, on first use.
 const START_WAIT: Duration = Duration::from_secs(3);
 const START_POLL: Duration = Duration::from_millis(25);
@@ -189,6 +191,26 @@ fn handle(backends: &dyn Backends, stream: UnixStream) -> std::io::Result<()> {
     writeln!(stream, "{reply}")
 }
 
+/// Whether a real service is behind this socket. Connecting isn't enough: a process starting at
+/// that moment can briefly inherit a dead service's handle, which accepts and then says nothing.
+fn answers(path: &Path) -> bool {
+    let Ok(stream) = UnixStream::connect(path) else {
+        return false;
+    };
+    let timeouts = stream
+        .set_read_timeout(Some(LIVENESS_TIMEOUT))
+        .and_then(|()| stream.set_write_timeout(Some(LIVENESS_TIMEOUT)));
+    let mut writer = &stream;
+    if timeouts.is_err() || writeln!(writer, "{}", json!({ "op": "ping" })).is_err() {
+        return false;
+    }
+    let mut line = String::new();
+    if BufReader::new(&stream).read_line(&mut line).is_err() {
+        return false;
+    }
+    serde_json::from_str::<Value>(&line).is_ok_and(|reply| reply.get("pid").is_some())
+}
+
 /// Claims the socket, clearing one left by a service that died. Fails if another is running.
 fn bind(path: &Path) -> anyhow::Result<UnixListener> {
     if let Some(parent) = path.parent() {
@@ -196,7 +218,7 @@ fn bind(path: &Path) -> anyhow::Result<UnixListener> {
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).ok();
     }
     if path.exists() {
-        if UnixStream::connect(path).is_ok() {
+        if answers(path) {
             bail!("the service is already running");
         }
         fs::remove_file(path).context("clearing an old socket")?;
@@ -499,6 +521,15 @@ mod tests {
         let server = running(&dir, Duration::from_millis(100));
         wait_for_socket(&dir);
         server.join().unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn something_that_accepts_but_says_nothing_isnt_a_service() {
+        let dir = state("silent");
+        let silent = UnixListener::bind(socket_path(&dir)).unwrap();
+        assert!(!answers(&socket_path(&dir)));
+        drop(silent);
         fs::remove_dir_all(&dir).unwrap();
     }
 
