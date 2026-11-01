@@ -1,0 +1,10 @@
+{
+  "name": "ccc-cli-placeholder",
+  "version": "0.1.0",
+  "description": "See what Claude Code really costs, and test what helps",
+  "license": "MIT",
+  "bin": { "ccc": "bin/ccc.js" },
+  "files": ["bin"],
+  "engines": { "node": ">=18" },
+  "private": true
+}

@@ -54,7 +54,9 @@ These come from the same replay, using recorded token counts.
 
 The restart figures are the first numbers near the original 30% target, but they're upper limits. A replay can't tell whether a fresh session would have done the work as well, or how much it would have had to re-learn.
 
-So we tested it on a small scale: real Claude Code on 12 tasks, in one session or restarting every 4 tasks with a generated handoff. Nothing was lost, with every module passing and a rule from the first prompt still followed. But it barely saved anything: 5% less on Haiku, and 16% *more* on Sonnet, because each restart rewrites its cache. Those sessions peaked at 55K tokens, nowhere near 300K. So restarting doesn't pay in small sessions, and whether it pays in large ones is still untested.
+So we tested it on a small scale: real Claude Code on 12 tasks, in one session or restarting every 4 tasks with a generated handoff. Nothing was lost, with every module passing and a rule from the first prompt still followed. But in small sessions, peaking around 55K tokens, it barely saved anything: 5% less on Haiku, and 16% *more* on Sonnet, because each restart rewrites its cache.
+
+Then we made the sessions large by having each task read long design notes. With one restart on Sonnet, the session peaked at 271K tokens instead of 522K and cost $3.70 instead of $5.13, 28% less. Every module still passed, and a ticket number from every note reached the log. That's two runs per arm on synthetic tasks that don't depend on each other, which flatters a restart, so treat 28% as encouraging rather than settled. It's still the first real saving we measured that's near the original 30%, and it didn't come from compressing anything.
 
 Keeping the cache warm is the idea we most expected to win. Refreshing is 40 times cheaper than rewriting, but people are away for a long time, and a session you never return to pays for every refresh.
 

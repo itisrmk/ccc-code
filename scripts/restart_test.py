@@ -6,7 +6,12 @@ two ways: in one continuing session, and restarting every few tasks with a hando
 only in the first prompt checks whether the handoff carries what matters. The score comes from
 running each module's tests and reading the log, never from anything the model says.
 
-    scripts/restart_test.py --model claude-haiku-5-5 --reps 3 --max-usd 5
+    scripts/restart_test.py --model claude-haiku-5-5 --reps 3 --max-usd 5 --out results.jsonl
+    scripts/restart_test.py --large --restart-every 6 --max-usd 15 --out results.jsonl
+
+--large gives each module long design notes that must be read, so sessions grow past 300K tokens,
+the size at which `ccc whatif` simulates savings. A ticket number at the end of each note has to
+reach the log, which checks the notes really were read.
 
 Everything it runs is written in this repository. Spends Claude quota.
 """
@@ -35,10 +40,39 @@ RULE = (
     "Project rule for all of this work: every fix must add one line to FIXES.log in the repository "
     "root naming the module file you fixed. "
 )
+# About 20K tokens each, just under what Claude Code's Read tool takes in one go.
+NOTE_LINES = 1400
+NOTES_PER_TASK = 2
+WORDS = (
+    "the module keeps its state in memory because callers read it far more often than they write "
+    "and earlier versions tried a file which turned out slower under load so review this before "
+    "changing how values are stored or passed between functions in later releases"
+).split()
+LARGE_RULE = (
+    "Project rule for all of this work: every fix must add one line to FIXES.log in the repository "
+    "root naming the module file you fixed and the ticket numbers from the end of its notes. "
+)
 FIRST_FILE = {task: next(name for name in fixed) for task, (_, fixed) in FIXES.items()}
 
 
-def set_up(base):
+def ticket(task, number):
+    return f"T-{sum(map(ord, task)) * 7 + number}"
+
+
+def write_notes(work):
+    (work / "notes").mkdir()
+    for task in FIXES:
+        for number in range(NOTES_PER_TASK):
+            lines = []
+            for line in range(NOTE_LINES):
+                start = (line * 7 + number) % len(WORDS)
+                words = (WORDS + WORDS)[start:start + 12]
+                lines.append(f"{task} {number} {line}: {' '.join(words)}")
+            lines.append(f"Ticket: {ticket(task, number)}")
+            (work / "notes" / f"{task}-{number}.md").write_text("\n".join(lines) + "\n")
+
+
+def set_up(base, large=False):
     work = Path(tempfile.mkdtemp(dir=base, prefix="work-"))
     work = work.resolve()
     subprocess.run(["git", "init", "-q", "."], cwd=work, check=True)
@@ -46,20 +80,30 @@ def set_up(base):
     for task in FIXES:
         for name, content in TASKS[task].items():
             (work / name).write_text(content)
+    if large:
+        write_notes(work)
     return work
 
 
-def task_prompt(task, first):
+def task_prompt(task, first, large=False):
     message = FIXES[task][0]
     rule = RULE if first else ""
+    notes = ""
+    if large:
+        rule = LARGE_RULE if first else ""
+        names = " and ".join(f"notes/{task}-{number}.md" for number in range(NOTES_PER_TASK))
+        notes = (
+            f"Before changing anything, read all of {names} with the Read tool, without using "
+            "grep, head or tail on them. "
+        )
     return (
-        f"{rule}Work on {FIRST_FILE[task]} only for now: {message}. Tests for every module run "
+        f"{rule}{notes}Work on {FIRST_FILE[task]} only for now: {message}. Tests for every module run "
         "with 'python3 run_tests.py', and tests for modules not reached yet will still fail. Don't "
         "change test files or run_tests.py. Stop when this module's tests pass."
     )
 
 
-def claude(work, prompt, model, session=None, budget=2.0):
+def claude(work, prompt, model, session=None, budget=6.0):
     command = [
         "claude", "-p", prompt, "--model", model,
         "--allowedTools", "Bash,Read,Edit,Write,Grep,Glob",
@@ -133,12 +177,12 @@ def peak_context(folder):
 
 
 def run_arm(job):
-    arm, repetition, model, restart_every, base = job
-    work = set_up(base)
+    arm, repetition, model, restart_every, base, large = job
+    work = set_up(base, large)
     tasks = list(FIXES)
     reported, restarts, errors, session = 0.0, 0, [], None
     for index, task in enumerate(tasks):
-        prompt = task_prompt(task, index == 0)
+        prompt = task_prompt(task, index == 0, large)
         if arm == "restart" and index and index % restart_every == 0:
             transcript = project_dir(work) / f"{session}.jsonl"
             handoff = subprocess.run(
@@ -159,11 +203,15 @@ def run_arm(job):
     passed = [task for task in tasks if module_passes(work, task)]
     log = (work / "FIXES.log").read_text() if (work / "FIXES.log").exists() else ""
     logged = [task for task in tasks if FIRST_FILE[task] in log or FIRST_FILE[task][:-3] in log]
+    tickets = sum(
+        ticket(task, number) in log for task in tasks for number in range(NOTES_PER_TASK)
+    )
     record = {
         "arm": arm, "repetition": repetition, "model": model, "restart_every": restart_every,
         "cost_usd": recorded_cost(project_dir(work), base), "reported_sum_usd": reported,
         "restarts": restarts, "modules_passed": len(passed),
-        "rule_followed": len(logged), "modules": len(tasks), "tests_intact": tests_intact(work),
+        "rule_followed": len(logged), "tickets_logged": tickets if large else None,
+        "large": large, "modules": len(tasks), "tests_intact": tests_intact(work),
         "peak_context": peak_context(project_dir(work)), "errors": errors,
     }
     shutil.rmtree(project_dir(work), ignore_errors=True)
@@ -172,17 +220,21 @@ def run_arm(job):
 
 
 def main():
+    global NOTES_PER_TASK
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="claude-haiku-5-5")
     parser.add_argument("--reps", type=int, default=3)
     parser.add_argument("--restart-every", type=int, default=4)
     parser.add_argument("--jobs", type=int, default=4)
+    parser.add_argument("--large", action="store_true", help="Grow sessions past 300K tokens")
+    parser.add_argument("--notes-per-task", type=int, default=NOTES_PER_TASK)
     parser.add_argument("--max-usd", type=float, required=True, help="Start no new run past this")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
+    NOTES_PER_TASK = args.notes_per_task
     base = Path(tempfile.mkdtemp(prefix="ccc-restart-")).resolve()
     jobs = [
-        (arm, repetition, args.model, args.restart_every, base)
+        (arm, repetition, args.model, args.restart_every, base, args.large)
         for repetition in range(args.reps)
         for arm in ("continuous", "restart")
     ]

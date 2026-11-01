@@ -2,6 +2,8 @@
 
 Tools for working out what Claude Code really costs and whether your setup really helps.
 
+![ccc whatif on a sample history](docs/demo.svg)
+
 - **`ccc whatif`** shows where your sessions' money went and what restarting or refreshing them would have changed.
 - **`ccc eval`** tests a `CLAUDE.md`, skill or hook on tasks from a repository's history, scored by running the tests.
 - **`ccc init`** warns you when a session's cache has expired or its context has grown large, before you pay for it, and **`ccc handoff --start`** continues in a fresh session.
@@ -187,7 +189,7 @@ From `ccc whatif` on 3,489 calls in 10 sessions, $673.88 at list prices. Two ses
 
 | Change, simulated | Effect on cost | Catch |
 |---|---|---|
-| Restart above 300K, restoring 50K | -36% at most | Ignores rework and any effect on the work. Not tested at this size |
+| Restart above 300K, restoring 50K | -36% at most | Ignores rework and any effect on the work. [Real runs](#does-restarting-really-save-money) gave -28% on synthetic tasks |
 | Restart above 300K, restoring 100K | -31% at most | The same |
 | Refresh the cache for up to 8 hours when idle | -3.0% at best | Needs something running throughout |
 | Refresh the cache for up to 48 hours when idle | +4.6% | Most refreshes are wasted |
@@ -198,10 +200,14 @@ Real Claude Code worked through 12 tasks in one repository, either in one sessio
 
 | Model | Runs per arm | One session | Restarting | Peak context | Modules passed | Rule followed |
 |---|---|---|---|---|---|---|
-| Haiku | 6 | $0.0304 | $0.0288, 5% less | 55K vs 34K | 12/12 in all | 12/12 in all |
-| Sonnet | 3 | $0.3672 | $0.4256, 16% more | 35K vs 28K | 12/12 in all | 12/12 in all |
+| Haiku, small sessions | 6 | $0.0304 | $0.0288, 5% less | 55K vs 34K | 12/12 in all | 12/12 in all |
+| Sonnet, small sessions | 3 | $0.3672 | $0.4256, 16% more | 35K vs 28K | 12/12 in all | 12/12 in all |
+| Sonnet, large sessions, one restart | 2 | $5.13 | $3.70, **28% less** | 522K vs 271K | 12/12 in all | 12/12 in all |
+| Haiku, larger sessions, one restart | 1 | $2.15 | $1.76, 18% less | 947K vs 530K | 12/12 in all | 12/12 in all |
 
-The handoff lost nothing here. But at these sizes restarting barely helps, and can cost more, because each restart rewrites its cache. The simulated savings above are for sessions past 300K tokens, which this test never reached, so they remain unproven. These tasks are also independent of each other, which flatters a restart.
+The large runs make each task read long design notes, and a ticket number from each note had to reach the log. All of them did.
+
+So size decides it. In small sessions, restarting barely helps and can cost more, because each restart rewrites its cache. Past a few hundred thousand tokens it saved real money and lost nothing. With only 1 or 2 runs per arm, treat the size of the saving as rough. These tasks are also independent of each other, which flatters a restart: real work that builds on what came before would need more re-reading.
 
 ### Does adding context to prompts help?
 
@@ -281,6 +287,10 @@ This is why the model-based features are off by default. The prune model also tu
 - **`~/.ccc` isn't cleaned up.** Its small per-conversation files accumulate.
 - **Ollama is untested.** `--local-url` was only tested against a fake server.
 - **`ccc verify` hasn't met a real third-party gateway.** It's been run on `ccc` itself and on 13 deliberately broken test gateways.
+
+## Packaging
+
+`packaging/npm` runs the right binary through `npx`, downloading it on first use and refusing one whose checksum doesn't match. `scripts/test_npm_wrapper.py` tests that against a local stand-in for a release. `packaging/homebrew/ccc.rb` is a formula template that has only had a syntax check, and `.github/workflows/release.yml` has never run. All three need a public repository and a final name: `ccc` and `ccc-cli` are taken on npm. `scripts/make_demo.py` redraws the demo from real output on a sample history.
 
 ## Testing
 

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="468" viewBox="0 0 900 468" role="img" aria-label="ccc whatif output on a sample history">
+<style>
+text { font: 14px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: 0; animation: show .01s linear forwards; }
+@keyframes show { to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { text { animation: none; opacity: 1; } }
+</style>
+<rect width="900" height="468" rx="10" fill="#0d1117"/>
+<circle cx="22" cy="20" r="6" fill="#ff5f56"/><circle cx="42" cy="20" r="6" fill="#ffbd2e"/><circle cx="62" cy="20" r="6" fill="#27c93f"/>
+<text x="20" y="58" fill="#7ee787" xml:space="preserve" style="animation-delay:0.60s">$ ccc whatif --share</text>
+<text x="20" y="78" fill="#e6edf3" xml:space="preserve" style="animation-delay:1.50s">$74 of Claude Code at list prices. 79% of it was calls over 300K tokens of</text>
+<text x="20" y="98" fill="#e6edf3" xml:space="preserve" style="animation-delay:1.78s">context. Restarting at that size would have cost at most $28 less.</text>
+<text x="20" y="118" fill="#e6edf3" xml:space="preserve" style="animation-delay:2.06s"></text>
+<text x="20" y="138" fill="#7ee787" xml:space="preserve" style="animation-delay:2.34s">$ ccc whatif</text>
+<text x="20" y="158" fill="#e6edf3" xml:space="preserve" style="animation-delay:3.24s">Where the money went</text>
+<text x="20" y="178" fill="#e6edf3" xml:space="preserve" style="animation-delay:3.52s">  cache reads                               55.6%</text>
+<text x="20" y="198" fill="#e6edf3" xml:space="preserve" style="animation-delay:3.80s">  cache writes                              40.4%</text>
+<text x="20" y="218" fill="#e6edf3" xml:space="preserve" style="animation-delay:4.08s">  output                                     4.0%</text>
+<text x="20" y="238" fill="#e6edf3" xml:space="preserve" style="animation-delay:4.36s">  rewrites after idle (overlaps)            23.8%  5 rewrites</text>
+<text x="20" y="258" fill="#e6edf3" xml:space="preserve" style="animation-delay:4.64s">Cost by context size</text>
+<text x="20" y="278" fill="#e6edf3" xml:space="preserve" style="animation-delay:4.92s">  from    0K tokens      117 calls       5.1%</text>
+<text x="20" y="298" fill="#e6edf3" xml:space="preserve" style="animation-delay:5.20s">  from  100K tokens      149 calls      15.8%</text>
+<text x="20" y="318" fill="#e6edf3" xml:space="preserve" style="animation-delay:5.48s">  from  300K tokens      225 calls      49.2%</text>
+<text x="20" y="338" fill="#e6edf3" xml:space="preserve" style="animation-delay:5.76s">  from  600K tokens      104 calls      29.9%</text>
+<text x="20" y="358" fill="#e6edf3" xml:space="preserve" style="animation-delay:6.04s">Restarting at the next prompt above a context size: change in cost (restarts)</text>
+<text x="20" y="378" fill="#e6edf3" xml:space="preserve" style="animation-delay:6.32s">  above                 10K restored          50K restored         100K restored</text>
+<text x="20" y="398" fill="#e6edf3" xml:space="preserve" style="animation-delay:6.60s">  300K                    -41.1% (4)            -37.6% (5)            -31.0% (5)</text>
+<text x="20" y="418" fill="#e6edf3" xml:space="preserve" style="animation-delay:6.88s"></text>
+<text x="20" y="438" fill="#8b949e" xml:space="preserve" style="animation-delay:7.16s">Sample history. Restart figures are upper limits.</text>
+</svg>
