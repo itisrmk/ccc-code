@@ -1,6 +1,6 @@
 [package]
 name = "ccc"
-description = "Local-first prompt compiler for Claude Code"
+description = "See what Claude Code really costs, and test what helps"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

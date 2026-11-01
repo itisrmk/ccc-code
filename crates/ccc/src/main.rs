@@ -1,4 +1,4 @@
-//! `ccc`: a local-first prompt compiler for Claude Code.
+//! `ccc`: see what Claude Code really costs, and test what helps.
 
 mod advise;
 mod bench;
