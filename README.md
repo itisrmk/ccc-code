@@ -1,4 +1,4 @@
-# ccc
+# ccc-code
 
 Tools for working out what Claude Code really costs and whether your setup really helps.
 
@@ -8,7 +8,7 @@ Tools for working out what Claude Code really costs and whether your setup reall
 - **`ccc eval`** tests a `CLAUDE.md`, skill or hook on tasks from a repository's history, scored by running the tests.
 - **`ccc init`** warns you when a session's cache has expired or its context has grown large, before you pay for it, and **`ccc handoff --start`** continues in a fresh session.
 - **`ccc ask`** answers questions about your code with a local model, free and offline. `ccc mcp` offers that to Claude as a tool.
-- **`ccc init --enhance`** adds likely relevant files to each prompt as context, without changing your words. It helped one model and hurt another in testing, so measure it first.
+- **`ccc init --enhance`** adds likely relevant files to each prompt as context, without changing your words. **It passed fewer real tasks in testing, so it's off by default.** Measure it on your own work before turning it on.
 - **`ccc verify`** checks whether a gateway is safe to put in front of Claude Code.
 - **`ccc run`** is a local proxy that redacts secrets, trims noisy tool output and records costs.
 
@@ -22,16 +22,16 @@ None of these except `ccc run` and `ccc serve` sits between you and the API, unl
 
 ## Install
 
-Tested with Rust 1.99 on macOS.
+Tested with Rust 1.99 on macOS. The command is `ccc`.
 
 ```sh
-cargo install --path crates/ccc
+cargo install --git https://github.com/itisrmk/ccc-code ccc
 ```
 
 Optional features, which add native code and need model downloads:
 
 ```sh
-cargo install --path crates/ccc --features local-model,ner
+cargo install --git https://github.com/itisrmk/ccc-code ccc --features local-model,ner
 scripts/fetch-models.sh classifier   # Qwen3-4B, about 2.5 GB
 scripts/fetch-models.sh ner          # GLiNER, about 190 MB
 ```
@@ -72,7 +72,7 @@ Restarting isn't automatically cheaper, because a fresh session has to rewrite i
 ### Use a local model
 
 ```sh
-cargo install --path crates/ccc --features local-model
+cargo install --git https://github.com/itisrmk/ccc-code ccc --features local-model
 scripts/fetch-models.sh embedding     # EmbeddingGemma, 334 MB, under Google's Gemma terms
 scripts/fetch-models.sh gemma         # Gemma 4 E2B, 2.8 GB, Apache 2.0
 ccc embed                             # build this directory's vectors, about 25 chunks a second
@@ -211,14 +211,23 @@ So size decides it. In small sessions, restarting barely helps and can cost more
 
 ### Does adding context to prompts help?
 
-The same 12 tasks with and without `ccc init --enhance`, scored by `ccc eval`.
+Probably not. On 7 real tasks from one of the author's Rust projects, with and without `ccc init --enhance`, one run each:
+
+| Model | Passed without | Passed with | Cost | Turns |
+|---|---|---|---|---|
+| Haiku | 7 of 7 | 5 of 7 | $0.055 vs $0.034, 62% more | 27.6 vs 20.1 |
+| Sonnet | 6 of 7 | 5 of 7 | $0.181 vs $0.199, 9% less | 12.1 vs 12.3 |
+
+Seven tasks can't prove this statistically, and none of these differences reached the bar. But it never passed more tasks, which is why it's off by default.
+
+On 12 tiny synthetic tasks, scored the same way, every run passed and cost went in opposite directions:
 
 | Model | Runs per setup | Cost | Turns | Result |
 |---|---|---|---|---|
 | Haiku | 72 | $0.0036 vs $0.0042, 14% less | 4.2 vs 4.7 | Better, p = 0.003 for cost and 0.017 for turns |
 | Sonnet | 24 | $0.0461 vs $0.0405, 14% more | 4.8 vs 3.1 | Worse, p = 0.0005 for cost and 0.001 for turns |
 
-Every run passed either way. The same feature helped one model and hurt the other, so it's off by default. The Haiku runs were extended after looking at a first batch, which makes its p-values somewhat optimistic. This is a tiny repository, and large ones may differ in either direction.
+The Haiku runs were extended after looking at a first batch, which makes its p-values somewhat optimistic.
 
 Choosing the files, on 106 real prompts from 3 repositories (`ccc enrich-eval --embedding-model`), judged against what the work really touched. This uses today's code, so it flatters every row that reads it.
 
@@ -245,7 +254,9 @@ Tested on 12 tasks in a synthetic repository (`scripts/eval_fixture.py`), 3 repe
 | Told it can't edit files | 0% vs 100% | -6% | 5.7 vs 4.5 | Caught, p = 0.0005 |
 | Told never to run tests | 94.4% vs 100% | -17% | 4.1 vs 4.5 | Lower pass rate not detected |
 
-It catches large effects. It missed the last one because these tasks are too easy: Haiku passed 34 of 36 without being allowed to test. Small effects on hard, real work are unproven, because this hasn't run on a real repository's history to completion. A run that gives up early is cheap, so the report warns when lower cost comes with fewer passes.
+It catches large effects. It missed the last one because these tasks are too easy: Haiku passed 34 of 36 without being allowed to test. A run that gives up early is cheap, so the report warns when lower cost comes with fewer passes.
+
+On real tasks the same setup does far more damage. Mined from one of the author's Rust projects, 7 tasks of up to 293 changed lines, on Haiku: told never to run tests, it passed 1 of 7 against 7 of 7, in 2.0 turns against 20.1. Even so, the pass rate didn't reach the bar (p = 0.03, when 7 tasks with one tie can't go below that). Cost and turns did, and the report warned that the lower cost came from giving up. A real repository may also give few tasks: this one gave 7 from 160 commits, so expect to want at least two repositories for small differences. These runs have been made on one project only. Task results aren't published here, because they hold private commit messages.
 
 ### Does it hurt task success?
 
@@ -290,7 +301,7 @@ This is why the model-based features are off by default. The prune model also tu
 
 ## Packaging
 
-`packaging/npm` runs the right binary through `npx`, downloading it on first use and refusing one whose checksum doesn't match. `scripts/test_npm_wrapper.py` tests that against a local stand-in for a release. `packaging/homebrew/ccc.rb` is a formula template that has only had a syntax check, and `.github/workflows/release.yml` has never run. All three need a public repository and a final name: `ccc` and `ccc-cli` are taken on npm. `scripts/make_demo.py` redraws the demo from real output on a sample history.
+`packaging/npm` runs the right binary through `npx`, downloading it on first use and refusing one whose checksum doesn't match. `scripts/test_npm_wrapper.py` tests that against a local stand-in for a release. It isn't on npm yet. `packaging/homebrew/ccc.rb` is a formula template that has only had a syntax check, and `.github/workflows/release.yml` hasn't run. These all wait on a first tagged release. `scripts/make_demo.py` redraws the demo from real output on a sample history.
 
 ## Testing
 

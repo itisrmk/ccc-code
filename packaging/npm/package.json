@@ -1,7 +1,8 @@
 {
-  "name": "ccc-cli-placeholder",
+  "name": "ccc-code",
   "version": "0.1.0",
   "description": "See what Claude Code really costs, and test what helps",
+  "repository": "github:itisrmk/ccc-code",
   "license": "MIT",
   "bin": { "ccc": "bin/ccc.js" },
   "files": ["bin"],

@@ -5,8 +5,8 @@
 ## Run it
 
 ```sh
-cargo install --path crates/ccc
-ccc whatif ~/.claude/projects --export whatif.json
+cargo install --git https://github.com/itisrmk/ccc-code ccc
+ccc whatif --export whatif.json
 ccc bench ~/.claude/projects --export bench.json
 ```
 

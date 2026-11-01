@@ -10,7 +10,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const VERSION = require("../package.json").version;
-const REPOSITORY = "OWNER/ccc";
+const REPOSITORY = "itisrmk/ccc-code";
 const TARGETS = {
   "darwin arm64": "aarch64-apple-darwin",
   "darwin x64": "x86_64-apple-darwin",

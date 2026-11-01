@@ -1,6 +1,6 @@
 # ccc
 
-A local proxy between Claude Code and the Anthropic API that compiles every request. Plan: `~/.claude/plans/resilient-noodling-sun.md`.
+Tools for measuring and reducing what Claude Code costs, including a local proxy that compiles every request.
 
 `cargo` isn't on `PATH` here. Use `export PATH=/opt/homebrew/opt/rustup/bin:$PATH`.
 
@@ -64,6 +64,7 @@ Newest first. Record what was tested, what happened and any real finding. Number
 
 ### 2026-11-01
 
+- First `ccc eval` on a real repository, one of the author's own Rust projects: 160 commits gave 7 tasks with limits of 400 lines and 6 files, 2 with 120 lines and 3 files, and 17 commits failed their own tests. Haiku, 21 runs, $0.65: plain 7/7, "never run tests" 1/7 in 2.0 turns against 20.1, enhanced 5/7 at 62% more cost. Sonnet, 14 runs, $2.66: plain 6/7, enhanced 5/7 at 9% less. One repetition each. Enhancement never passed more tasks, so it stays off and the README says so. Pass-rate differences missed the bar because 7 tasks with a tie can't go below p = 0.03. Keep results from private repositories out of this repo: `target/experiment/own` is ignored for that reason.
 - Restart test at scale (`scripts/restart_test.py --large`), real runs: Sonnet $3.70 against $5.13 (-28%, 2 runs per arm, peak 271K against 522K, one restart). Haiku $1.76 against $2.15 (-18%, 1 run per arm, peak 530K against 947K). Every run passed 12/12 modules, followed the first prompt's rule, and logged every ticket from notes it had to read. Small runs and large runs disagree because each restart rewrites the cache, so it only pays once context is large. Tasks are independent, which flatters a restart. About $22 at list prices.
 - Prompt enhancement on the 12 synthetic tasks: Haiku cost 14% less and took 4.2 turns against 4.7 (p = 0.003, 0.017, over 72 pairs, extended after a first look, so somewhat optimistic). Sonnet cost 14% more and took 4.8 turns against 3.1 (p = 0.0005, 0.001, over 24 pairs). All passed. Same feature, opposite results, so it's off by default. Why Sonnet does worse wasn't investigated.
 - File suggestions on 106 real prompts: keywords 20.8% hit at 3, EmbeddingGemma 25.5%, both 28.3%, past sessions plus keywords 45.3%, all three by rank fusion 40.6%, reordered by Gemma 4 E2B 37.7% in 638 ms, by Qwen3-4B 32.1% in 1.19 s. Reordering hurts and embeddings don't improve on past sessions, so enhancement uses vectors only without history and no model chooses files.
