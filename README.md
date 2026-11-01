@@ -1,37 +1,56 @@
 # ccc-code
 
-Tools for working out what Claude Code really costs and whether your setup really helps.
+Built to make your Claude limit last longer. A small model on your machine helps with your prompts and does small jobs for Claude, and you can see what your sessions cost and test what helps.
 
 ![ccc whatif on a sample history](docs/demo.svg)
 
-- **`ccc whatif`** shows where your sessions' money went and what restarting or refreshing them would have changed.
-- **`ccc eval`** tests a `CLAUDE.md`, skill or hook on tasks from a repository's history, scored by running the tests.
-- **`ccc init`** warns you when a session's cache has expired or its context has grown large, before you pay for it, and **`ccc handoff --start`** continues in a fresh session.
-- **`ccc ask`** answers questions about your code with a local model, free and offline. `ccc mcp` offers that to Claude as a tool.
-- **`ccc init --enhance`** adds likely relevant files to each prompt as context, without changing your words. **It passed fewer real tasks in testing, so it's off by default.** Measure it on your own work before turning it on.
-- **`ccc verify`** checks whether a gateway is safe to put in front of Claude Code.
-- **`ccc run`** is a local proxy that redacts secrets, trims noisy tool output and records costs.
+**This is early, and it publishes what didn't work.** Restarting a large session cut real cost by 28% in testing, on synthetic tasks. Adding context to prompts never passed more real tasks than leaving it out, so it's off by default. Trimming output saved only 0.4% of cost. The [results](#results) have the details, and `ccc whatif` measures your own sessions.
 
-None of these except `ccc run` and `ccc serve` sits between you and the API, unless you point `ccc verify` at a proxy.
-
-**The proxy doesn't deliver the large token savings it was designed for.** On the author's sessions, trimming cuts context by about 0.6% and cost by about 0.4%. The [results](#results) explain why, and [the write-up](docs/token-savings-writeup.md) goes further. `ccc bench` and `ccc whatif` measure your own sessions.
-
-## Read this before using a subscription login
-
-`ccc` forwards whatever credentials Claude Code sends, including a Pro or Max login, and never stores or logs them. Claude Code's docs describe using `ANTHROPIC_BASE_URL` with a subscription login. Anthropic's [legal and compliance page](https://code.claude.com/docs/en/legal-and-compliance) also says third-party developers may not "route requests through Free, Pro, Max, or Ultra plan credentials on behalf of their users" or "intermediate Claude.ai credentials or session tokens". Read that page and decide for yourself, especially before offering `ccc` to anyone else. An API key avoids the question.
-
-## Install
-
-Tested with Rust 1.99 on macOS. The command is `ccc`.
+## Quick start
 
 ```sh
-cargo install --git https://github.com/itisrmk/ccc-code ccc
+cargo install --git https://github.com/itisrmk/ccc-code ccc   # needs Rust and CMake
+ccc setup
 ```
 
-Optional features, which add native code and need model downloads:
+Setup adds cost warnings and a status line to Claude Code, and offers Claude a local code search. A larger model finishes downloading in the background, so you can start straight away. Everything runs on your machine, and `ccc uninstall` takes it all back out. Setup leaves your own status line alone if you have one.
+
+Your status line then shows what matters on a plan:
+
+```
+week limit 62% · cache 12m · context 340K · saved 18K today
+```
+
+| Command | What it does |
+|---|---|
+| `ccc whatif` | Shows where your Claude usage went, and what restarting would have changed |
+| `ccc ask "..."` | Answers questions about this code with a local model, free and offline |
+| `ccc handoff --start` | Continues this directory's last session in a fresh one |
+| `ccc gain` | Shows what the local model kept out of Claude's context |
+| `ccc eval` | Tests whether a `CLAUDE.md`, skill or hook really helps, on your repository's history |
+| `ccc doctor` | Checks that everything's working |
+| `ccc advanced` | Lists everything else, including the proxy, `ccc verify` and `ccc bench` |
+
+**What the models need:** search by meaning uses about 450 MB of memory and a 334 MB download. Answering questions uses about 2.8 GB and a 2.8 GB download, so setup skips it below 16 GB of memory unless you pass `--full`. Both unload after 10 idle minutes.
+
+**Already run Ollama or LM Studio?**
 
 ```sh
-cargo install --git https://github.com/itisrmk/ccc-code ccc --features local-model,ner
+ccc setup --server http://127.0.0.1:11434/v1 --embedding-model NAME --answer-model NAME
+```
+
+**In Claude Code, as a plugin:** run `/plugin marketplace add itisrmk/ccc-code`, then `/plugin install ccc-code --marketplace itisrmk/ccc-code`. The plugin still needs the `ccc` program, and it adds `/ccc-code:restart` and `/ccc-code:sharpen`.
+
+Prebuilt downloads are coming with the first full release. `install.sh` and an `npx` wrapper are ready and waiting on it, and neither is on npm yet.
+
+## Install details
+
+Tested with Rust 1.99 on macOS. Linux builds in CI, but hasn't been used in practice. The command is `ccc`. To build without the model runner, and so without CMake, use `--no-default-features` and point setup at a server.
+
+Older optional parts need their own downloads:
+
+```sh
+cargo install --git https://github.com/itisrmk/ccc-code ccc --features ner
 scripts/fetch-models.sh classifier   # Qwen3-4B, about 2.5 GB
 scripts/fetch-models.sh ner          # GLiNER, about 190 MB
 ```
@@ -46,7 +65,7 @@ ccc dashboard                           # the same, as a page on localhost
 ccc bench ~/.claude/projects            # measure effects on your own sessions, offline
 ccc whatif                              # where the money went, and what would change it
 ccc whatif --share                      # the same as one line of totals
-ccc init                                # turn on cost warnings
+ccc doctor                              # check everything's working
 ccc handoff --start                     # continue this directory's last session in a fresh one
 ```
 
@@ -55,6 +74,8 @@ ccc handoff --start                     # continue this directory's last session
 `ccc whatif` replays recorded token counts, so it needs no model and sends nothing anywhere. It breaks spending down by type and context size, then simulates restarting long sessions and keeping caches warm. With no change, the simulation reproduces recorded usage exactly. A restart's figure is an upper limit, because a replay can't see rework or whether the work would have gone as well. `--export FILE` writes totals only, to [share if you choose](docs/share-your-numbers.md).
 
 ### Get warned before you pay
+
+`ccc setup` turns these on. To have only the warnings, with no models:
 
 ```sh
 ccc init               # adds hooks to ~/.claude/settings.json, keeping a copy of the file
@@ -72,12 +93,11 @@ Restarting isn't automatically cheaper, because a fresh session has to rewrite i
 ### Use a local model
 
 ```sh
-cargo install --git https://github.com/itisrmk/ccc-code ccc --features local-model
-scripts/fetch-models.sh embedding     # EmbeddingGemma, 334 MB, under Google's Gemma terms
-scripts/fetch-models.sh gemma         # Gemma 4 E2B, 2.8 GB, Apache 2.0
 ccc embed                             # build this directory's vectors, about 25 chunks a second
 ccc ask "where do we check session tokens?"
 ```
+
+Setup fetches EmbeddingGemma (under Google's Gemma terms) and Gemma 4 E2B (Apache 2.0). Sessions in a git repository keep their vectors current in the background, up to 2,000 new chunks at a time.
 
 `ccc ask` finds the closest code by meaning and has Gemma answer from it, naming what it looked at. Nothing leaves your machine. It took about 8 seconds on an M2 Pro, and it's a small model that can be wrong, so treat its answers as a starting point.
 
@@ -119,6 +139,12 @@ Your gateway forwards to a recording stand-in for the API, so this needs no API 
 The stand-in compares bytes and doesn't validate signatures. For the real server's verdict, chain your gateway to `ccc serve --enforce-thinking-check` and run Claude Code through it.
 
 State lives in `~/.ccc`: a redaction key, per-conversation settings, the cost ledger, and anything the optional features save.
+
+## The proxy, and subscription logins
+
+`ccc` forwards whatever credentials Claude Code sends, including a Pro or Max login, and never stores or logs them. Claude Code's docs describe using `ANTHROPIC_BASE_URL` with a subscription login. Anthropic's [legal and compliance page](https://code.claude.com/docs/en/legal-and-compliance) also says third-party developers may not "route requests through Free, Pro, Max, or Ultra plan credentials on behalf of their users" or "intermediate Claude.ai credentials or session tokens". Read that page and decide for yourself, especially before offering `ccc` to anyone else. An API key avoids the question.
+
+`ccc run` is the older half of this project: a proxy that redacts secrets and trims output. Nothing above needs it, and it's the only part that handles your login.
 
 ## What each stage does
 

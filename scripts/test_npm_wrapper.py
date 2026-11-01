@@ -71,6 +71,29 @@ def main():
         assert first.stdout.startswith("ccc "), first.stdout
         print(f"ok: downloaded, checked and ran: {first.stdout.strip()}")
 
+        script = ROOT / "install.sh"
+        env = {
+            "PATH": "/usr/bin:/bin:/opt/homebrew/bin", "HOME": str(scratch),
+            "CCC_DOWNLOAD_BASE": base, "CCC_VERSION": f"v{VERSION}",
+        }
+        installed = subprocess.run(
+            ["sh", str(script)], env={**env, "CCC_INSTALL_DIR": str(scratch / "bin")},
+            capture_output=True, text=True, timeout=120,
+        )
+        assert installed.returncode == 0, installed.stderr
+        ran = subprocess.run([str(scratch / "bin" / "ccc"), "--version"], capture_output=True, text=True)
+        assert ran.stdout.startswith("ccc "), ran.stdout
+        print("ok: install.sh downloaded, checked and installed it")
+
+        publish(site, tamper=True)
+        refused = subprocess.run(
+            ["sh", str(script)], env={**env, "CCC_INSTALL_DIR": str(scratch / "bad-bin")},
+            capture_output=True, text=True, timeout=120,
+        )
+        assert refused.returncode != 0 and "checksum mismatch" in refused.stderr, refused.stderr
+        assert not (scratch / "bad-bin" / "ccc").exists(), "a refused binary was installed"
+        print("ok: install.sh refuses a wrong checksum")
+
         server.shutdown()
         cached = run("http://127.0.0.1:9", scratch / "good")
         assert cached.returncode == 0, cached.stderr

@@ -1,19 +1,21 @@
-//! `ccc`: see what Claude Code really costs, and test what helps.
+//! `ccc`: make your Claude limit last longer, with a small model on your machine.
 
 mod advise;
 mod bench;
 mod clients;
+mod config;
+mod daemon;
 mod dashboard;
 mod enhance;
 mod eval;
 mod export;
+mod gain;
 mod handoff;
 mod hooks;
 mod init;
 mod learn;
 #[cfg(feature = "local-model")]
 mod local_models;
-#[cfg(feature = "local-model")]
 mod local_work;
 #[cfg(feature = "local-model")]
 mod model_bench;
@@ -22,6 +24,8 @@ mod names;
 mod policy;
 mod router;
 mod run;
+mod setup;
+mod statusline;
 mod verify;
 mod whatif;
 
@@ -69,10 +73,31 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Set everything up: local models, cost warnings, status line and tools for Claude.
+    Setup(setup::SetupArgs),
+    /// Take everything back out again.
+    Uninstall(setup::UninstallArgs),
+    /// Check that everything's working.
+    Doctor(setup::DoctorArgs),
+    /// Show where things stand, without starting anything.
+    Status(StateArgs),
+    /// Show what the local model has kept out of Claude's context.
+    Gain(StateArgs),
+    /// List the other commands.
+    Advanced,
+    /// Print the status line. Called by Claude Code, not by hand.
+    #[command(hide = true)]
+    Statusline(StateArgs),
+    /// Download a model. Called by setup, not by hand.
+    #[command(hide = true)]
+    FetchModel(setup::FetchModelArgs),
+    #[command(hide = true)]
     /// Start the proxy and run a command, normally `claude`, pointed at it.
     Run(RunArgs),
+    #[command(hide = true)]
     /// Start the proxy and wait; point ANTHROPIC_BASE_URL at it yourself.
     Serve(ServeArgs),
+    #[command(hide = true)]
     /// Replay local transcripts and report token and cost effects. Nothing leaves the machine.
     Bench(BenchArgs),
     /// Show where sessions' money went, and what restarting or refreshing would change.
@@ -80,46 +105,58 @@ enum Command {
     Whatif(WhatifArgs),
     /// Test whether a Claude Code setup really helps, on tasks from a repository's own history.
     Eval(eval::EvalArgs),
+    #[command(hide = true)]
     /// Turn on cost warnings for Claude Code, by adding hooks to its settings.
     Init(init::InitArgs),
     /// Write what a fresh session needs from this one, and optionally start it. Costs nothing
     /// and calls no model until the new session starts.
     Handoff(handoff::HandoffArgs),
+    #[command(hide = true)]
     /// Check whether a gateway is safe to put between Claude Code and the API. Needs no API
     /// key: the gateway forwards to a recording stand-in, and nothing leaves the machine.
     Verify(verify::VerifyArgs),
+    #[command(hide = true)]
     /// Show what recent sessions cost at list prices.
     Stats(StatsArgs),
+    #[command(hide = true)]
     /// Learn which files past work needed, from local transcripts. Nothing leaves the machine.
     Learn(LearnArgs),
+    #[command(hide = true)]
     /// Build or refresh a repository's symbol index.
     Index(IndexArgs),
+    #[command(hide = true)]
     /// Judge file suggestions against what past work really touched.
     EnrichEval(EnrichEvalArgs),
+    #[command(hide = true)]
     /// Print the settings that register ccc's hooks, for `claude --settings`.
     HookSettings(HookSettingsArgs),
+    #[command(hide = true)]
     /// Handle a Claude Code hook. Called by Claude Code, not by hand.
     Hook(HookArgs),
+    #[command(hide = true)]
     /// Train the learned router from labelled requests, and report its held-out accuracy.
     RouterTrain(RouterTrainArgs),
+    #[command(hide = true)]
     /// Serve a page of recent sessions' costs on this machine.
     Dashboard(DashboardArgs),
+    #[command(hide = true)]
     /// Show the context prompt enhancement would add to a prompt. Costs nothing.
     Enhance(EnhanceArgs),
-    /// Build this directory's vectors for search by meaning. Needs the local-model build feature.
-    #[cfg(feature = "local-model")]
+    /// Build this directory's vectors for search by meaning.
     Embed(local_work::EmbedArgs),
     /// Ask a local model about the code in this directory. Free, and nothing leaves the machine.
-    /// Needs the local-model build feature.
-    #[cfg(feature = "local-model")]
     Ask(local_work::AskArgs),
-    /// Serve local code search and questions as tools for Claude, over MCP on stdio. Needs the
-    /// local-model build feature.
-    #[cfg(feature = "local-model")]
-    Mcp(local_work::EmbedArgs),
+    #[command(hide = true)]
+    /// Serve local code search and questions as tools for Claude, over MCP on stdio.
+    Mcp(local_work::LocalArgs),
+    #[command(hide = true)]
+    /// Run the background service that holds local models. Started when needed.
+    Daemon(DaemonArgs),
+    #[command(hide = true)]
     /// Measure the name-detection model on files in a directory. Needs the ner build feature.
     #[cfg(feature = "ner")]
     NerBench(NerBenchArgs),
+    #[command(hide = true)]
     /// Measure a local model on this machine. Needs the local-model build feature.
     #[cfg(feature = "local-model")]
     ModelBench(ModelBenchArgs),
@@ -412,6 +449,15 @@ struct BenchArgs {
 }
 
 #[derive(Debug, Args)]
+struct DaemonArgs {
+    /// Exit after this long with nothing to do, which gives the memory back.
+    #[arg(long, value_name = "SECONDS", default_value_t = daemon::DEFAULT_IDLE.as_secs())]
+    idle_seconds: u64,
+    #[command(flatten)]
+    state: StateArgs,
+}
+
+#[derive(Debug, Args)]
 struct EnhanceArgs {
     /// The prompt to try.
     #[arg(value_name = "PROMPT")]
@@ -677,25 +723,70 @@ async fn main() -> anyhow::Result<ExitCode> {
             eval::command(&args)?;
             Ok(ExitCode::SUCCESS)
         }
+        Command::Setup(args) => {
+            setup::setup(&args, &claude_home()?).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Uninstall(args) => {
+            setup::uninstall(&args, &claude_home()?)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Doctor(args) => Ok(if setup::doctor(&args, &claude_home()?)? {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        }),
+        Command::Status(args) => {
+            setup::status(&args)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Gain(args) => {
+            gain::run(&args.dir()?)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::FetchModel(args) => {
+            setup::fetch_model_command(&args).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Statusline(args) => {
+            statusline::run(&args.dir()?)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Advanced => {
+            let mut out = std::io::stdout();
+            writeln!(out, "Other commands, each with its own --help:\n")?;
+            let command = <Cli as clap::CommandFactory>::command();
+            for sub in command.get_subcommands().filter(|sub| sub.is_hide_set()) {
+                let about = sub
+                    .get_about()
+                    .map_or_else(String::new, ToString::to_string);
+                writeln!(out, "  {:<15}{about}", sub.get_name())?;
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Enhance(args) => {
             let added = enhance::hook(&args.state.dir()?, ".", &args.prompt);
             let text = added.unwrap_or_else(|| "Nothing to add for that prompt.".to_owned());
             writeln!(std::io::stdout(), "{text}")?;
             Ok(ExitCode::SUCCESS)
         }
-        #[cfg(feature = "local-model")]
         Command::Embed(args) => {
             local_work::embed(&args)?;
             Ok(ExitCode::SUCCESS)
         }
-        #[cfg(feature = "local-model")]
         Command::Ask(args) => {
             local_work::ask(&args)?;
             Ok(ExitCode::SUCCESS)
         }
-        #[cfg(feature = "local-model")]
         Command::Mcp(args) => {
             local_work::mcp(&args)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Daemon(args) => {
+            daemon::run(
+                &args.state.dir()?,
+                std::time::Duration::from_secs(args.idle_seconds),
+            )?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Init(args) => {

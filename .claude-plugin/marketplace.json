@@ -1,0 +1,11 @@
+{
+  "name": "ccc-code",
+  "owner": { "name": "Rahul Kashyap" },
+  "plugins": [
+    {
+      "name": "ccc-code",
+      "source": "./plugin",
+      "description": "Make your Claude limit last longer, with a small model on your machine"
+    }
+  ]
+}

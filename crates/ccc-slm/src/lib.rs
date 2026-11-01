@@ -10,6 +10,7 @@ mod classify;
 #[cfg(feature = "llama")]
 mod llama;
 mod model;
+mod server;
 
 pub use blob::{
     BlobPrune, BlobPruneConfig, apply_keep_ranges, parse_keep_ranges, reads_fast_enough,
@@ -18,3 +19,4 @@ pub use classify::{Classify, DEFAULT_CLASSIFY_CAP, Difficulty, Intent, Labels, c
 #[cfg(feature = "llama")]
 pub use llama::{ChatFormat, LlamaConfig, LlamaEmbedder, LlamaModel, LoadModelError};
 pub use model::{Completion, CompletionRequest, Embedder, ModelError, TextModel};
+pub use server::ServerModel;

@@ -1,0 +1,12 @@
+#!/bin/sh
+# Runs the installed ccc. A plugin hook must never break a session, so a missing program is a
+# message at most, and only when a session starts.
+for candidate in "$(command -v ccc 2>/dev/null)" "$HOME/.ccc/bin/ccc" "$HOME/.local/bin/ccc" "$HOME/.cargo/bin/ccc"; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+        exec "$candidate" "$@"
+    fi
+done
+if [ "$1" = "hook" ] && [ "$2" = "advise-session-start" ]; then
+    printf '%s\n' '{"systemMessage":"ccc-code needs its program installed. See https://github.com/itisrmk/ccc-code"}'
+fi
+exit 0

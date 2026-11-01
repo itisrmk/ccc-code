@@ -280,7 +280,10 @@ dependencies = [
  "ccc-verify",
  "ccc-wire",
  "clap",
+ "futures-util",
+ "reqwest",
  "serde_json",
+ "sha2",
  "tokio",
  "toml",
  "tracing",
@@ -443,6 +446,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tracing",
+ "ureq",
 ]
 
 [[package]]

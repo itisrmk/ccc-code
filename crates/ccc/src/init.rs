@@ -109,6 +109,32 @@ fn add_ours(
     Ok(())
 }
 
+/// Adds the hooks to `settings`, replacing any earlier install.
+pub(crate) fn install_hooks(
+    settings: &mut Map<String, Value>,
+    ccc: &Path,
+    state_dir: &Path,
+) -> anyhow::Result<()> {
+    remove_ours(settings)?;
+    add_ours(settings, ccc, state_dir, false)
+}
+
+/// Takes the hooks out of `settings`.
+pub(crate) fn remove_hooks(settings: &mut Map<String, Value>) -> anyhow::Result<()> {
+    remove_ours(settings)
+}
+
+/// Whether every hook is in place.
+pub(crate) fn hooks_installed(settings: &Map<String, Value>) -> bool {
+    EVENTS.iter().all(|(event, _)| {
+        settings
+            .get("hooks")
+            .and_then(|hooks| hooks.get(*event))
+            .and_then(Value::as_array)
+            .is_some_and(|entries| entries.iter().any(is_ours))
+    })
+}
+
 /// What the settings should become. An existing install is replaced, so a moved binary is fixed
 /// by running this again.
 fn updated(

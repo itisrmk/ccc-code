@@ -1,5 +1,6 @@
 //! Work a local model can do for free: answering questions about a repository, directly with
-//! `ccc ask` or as a tool Claude can call through `ccc mcp`. Nothing leaves the machine.
+//! `ccc ask` or as a tool Claude can call through `ccc mcp`. Nothing leaves the machine, unless a
+//! server you configured is elsewhere.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -10,12 +11,12 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use ccc_index::{SemanticHit, SemanticIndex, query_text};
-use ccc_slm::{
-    ChatFormat, CompletionRequest, Embedder, LlamaConfig, LlamaEmbedder, LlamaModel, TextModel,
-};
+use ccc_slm::{CompletionRequest, Embedder, TextModel};
 use clap::Args;
 use serde_json::{Value, json};
 
+use crate::daemon::DaemonClient;
+use crate::gain;
 use crate::learn::semantic_cache_path;
 
 const EXCERPTS: usize = 6;
@@ -24,81 +25,38 @@ const EXCERPT_LINES: usize = 40;
 const MAX_ANSWER_TOKENS: u32 = 512;
 /// A person may wait this long for a free answer, and no longer.
 const ANSWER_DEADLINE: Duration = Duration::from_secs(90);
-const DEFAULT_EMBEDDING_MODEL: &str = "embeddinggemma-300M-Q8_0.gguf";
-const DEFAULT_ANSWER_MODEL: &str = "gemma-4-E2B-it-Q4_0.gguf";
+/// A person is waiting on a hook, so vectors arrive quickly or not at all.
+const VECTOR_PATIENCE: Duration = Duration::from_millis(800);
+const CHARS_PER_TOKEN: usize = 4;
 const SEARCH_LIMIT: u64 = 5;
 const MAX_SEARCH_LIMIT: u64 = 20;
 /// The MCP version to offer a client that doesn't name one.
 const MCP_VERSION: &str = "2025-06-18";
 
-fn model_path(state_dir: &Path, given: Option<&Path>, default: &str) -> PathBuf {
-    given.map_or_else(|| state_dir.join("models").join(default), Path::to_owned)
-}
-
-/// Models for this directory, loaded when first needed since they take memory and a moment.
+/// A repository's code, with models reached through the background service.
 struct Models {
     root: PathBuf,
     state_dir: PathBuf,
-    embedding: PathBuf,
-    answering: PathBuf,
-    embedder: OnceLock<LlamaEmbedder>,
-    answerer: OnceLock<LlamaModel>,
+    client: DaemonClient,
     index: OnceLock<SemanticIndex>,
 }
 
 impl Models {
-    fn new(
-        state_dir: &Path,
-        embedding: Option<&Path>,
-        answering: Option<&Path>,
-    ) -> anyhow::Result<Self> {
+    fn new(state_dir: &Path) -> anyhow::Result<Self> {
         let root = std::env::current_dir()
             .and_then(fs::canonicalize)
             .context("finding the current directory")?;
         Ok(Self {
             root,
             state_dir: state_dir.to_owned(),
-            embedding: model_path(state_dir, embedding, DEFAULT_EMBEDDING_MODEL),
-            answering: model_path(state_dir, answering, DEFAULT_ANSWER_MODEL),
-            embedder: OnceLock::new(),
-            answerer: OnceLock::new(),
+            client: DaemonClient::new(state_dir),
             index: OnceLock::new(),
         })
     }
 
-    fn embedder(&self) -> anyhow::Result<&LlamaEmbedder> {
-        if self.embedder.get().is_none() {
-            let loaded = LlamaEmbedder::load(&self.embedding).with_context(|| {
-                format!(
-                    "loading {}. scripts/fetch-models.sh embedding downloads it",
-                    self.embedding.display()
-                )
-            })?;
-            let _ = self.embedder.set(loaded);
-        }
-        self.embedder.get().context("the embedding model went away")
-    }
-
-    fn answerer(&self) -> anyhow::Result<&LlamaModel> {
-        if self.answerer.get().is_none() {
-            let config = LlamaConfig {
-                format: ChatFormat::Gemma4,
-                ..LlamaConfig::default()
-            };
-            let loaded = LlamaModel::load(&self.answering, config).with_context(|| {
-                format!(
-                    "loading {}. scripts/fetch-models.sh gemma downloads it",
-                    self.answering.display()
-                )
-            })?;
-            let _ = self.answerer.set(loaded);
-        }
-        self.answerer.get().context("the answering model went away")
-    }
-
     fn index(&self) -> anyhow::Result<&SemanticIndex> {
         if self.index.get().is_none() {
-            let built = refreshed_index(&self.state_dir, &self.root, self.embedder()?)?;
+            let built = refreshed_index(&self.state_dir, &self.root, &self.client)?;
             let _ = self.index.set(built);
         }
         self.index.get().context("the index went away")
@@ -185,50 +143,53 @@ fn answer(
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct LocalModelArgs {
-    /// The GGUF embedding model. Defaults to EmbeddingGemma in the state directory's models.
-    #[arg(long, value_name = "FILE")]
-    embedding_model: Option<PathBuf>,
-    /// The GGUF model that answers, in Gemma 4's format. Defaults to Gemma 4 E2B there.
-    #[arg(long, value_name = "FILE")]
-    model: Option<PathBuf>,
-    #[command(flatten)]
-    state: crate::StateArgs,
-}
-
-impl LocalModelArgs {
-    fn models(&self) -> anyhow::Result<Models> {
-        Models::new(
-            &self.state.dir()?,
-            self.embedding_model.as_deref(),
-            self.model.as_deref(),
-        )
-    }
-}
-
-#[derive(Debug, Args)]
 pub(crate) struct AskArgs {
     /// What to ask about the code in this directory.
     #[arg(value_name = "QUESTION")]
     question: String,
     #[command(flatten)]
-    local: LocalModelArgs,
+    state: crate::StateArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct LocalArgs {
+    #[command(flatten)]
+    state: crate::StateArgs,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct EmbedArgs {
+    /// Embed at most this many new chunks, leaving the rest for next time. For working through a
+    /// large repository in the background.
+    #[arg(long, value_name = "CHUNKS")]
+    budget: Option<usize>,
     #[command(flatten)]
-    local: LocalModelArgs,
+    state: crate::StateArgs,
 }
 
 /// `ccc embed`: builds this directory's vectors, reusing any whose text hasn't changed.
 pub(crate) fn embed(args: &EmbedArgs) -> anyhow::Result<()> {
-    let models = args.local.models()?;
+    let state_dir = args.state.dir()?;
+    let root = std::env::current_dir()
+        .and_then(fs::canonicalize)
+        .context("finding the current directory")?;
+    let client = DaemonClient::new(&state_dir);
     let started = std::time::Instant::now();
-    let index = models.index()?;
+    let cache = semantic_cache_path(&state_dir, &root);
+    let mut index = SemanticIndex::load(&cache);
+    let embedded = index
+        .refresh_within(
+            &root,
+            args.budget.unwrap_or(usize::MAX),
+            &mut |text: &str| client.embed(text),
+        )
+        .context("embedding the repository")?;
+    if embedded > 0 {
+        index.save(&cache).context("saving vectors")?;
+    }
     writeln!(
         std::io::stdout(),
-        "{} chunks ready in {:?}",
+        "{} chunks ready, {embedded} new, in {:?}",
         index.len(),
         started.elapsed()
     )?;
@@ -237,12 +198,12 @@ pub(crate) fn embed(args: &EmbedArgs) -> anyhow::Result<()> {
 
 /// `ccc ask`: answers from this directory's code without calling any service.
 pub(crate) fn ask(args: &AskArgs) -> anyhow::Result<()> {
-    let models = args.local.models()?;
+    let models = Models::new(&args.state.dir()?)?;
     let (text, sources) = answer(
         &models.root,
         models.index()?,
-        models.embedder()?,
-        models.answerer()?,
+        &models.client,
+        &models.client,
         &args.question,
     )?;
     let mut out = std::io::stdout();
@@ -262,11 +223,8 @@ pub(crate) fn vector_files(
     if index.is_empty() {
         return Vec::new();
     }
-    let path = model_path(state_dir, None, DEFAULT_EMBEDDING_MODEL);
-    let Ok(embedder) = LlamaEmbedder::load(&path) else {
-        return Vec::new();
-    };
-    search(&index, &embedder, prompt, depth).map_or_else(
+    let client = DaemonClient::impatient(state_dir, VECTOR_PATIENCE);
+    search(&index, &client, prompt, depth).map_or_else(
         |_| Vec::new(),
         |hits| hits.into_iter().map(|hit| hit.file).collect(),
     )
@@ -280,7 +238,7 @@ trait Tools {
 
 impl Tools for Models {
     fn search_code(&self, query: &str, limit: usize) -> anyhow::Result<String> {
-        let hits = search(self.index()?, self.embedder()?, query, limit)?;
+        let hits = search(self.index()?, &self.client, query, limit)?;
         let mut text = String::new();
         for hit in hits {
             let _ = writeln!(text, "{}:{} ({:.2})", hit.file, hit.start_line, hit.score);
@@ -292,12 +250,32 @@ impl Tools for Models {
         let (text, sources) = answer(
             &self.root,
             self.index()?,
-            self.embedder()?,
-            self.answerer()?,
+            &self.client,
+            &self.client,
             question,
         )?;
+        record_local_answer(&self.state_dir, &self.root, &sources, &text);
         Ok(format!("{text}\n\nLooked at: {}", sources.join(", ")))
     }
+}
+
+/// Counts what the local model read in place of Claude. It's an estimate, since Claude might not
+/// have read all of it, and `ccc gain` says so.
+fn record_local_answer(state_dir: &Path, root: &Path, sources: &[String], answer: &str) {
+    let read: usize = sources
+        .iter()
+        .filter_map(|source| source.rsplit_once(':'))
+        .filter_map(|(file, line)| {
+            let hit = SemanticHit {
+                file: file.to_owned(),
+                start_line: line.parse().ok()?,
+                score: 0.0,
+            };
+            excerpt(root, &hit).map(|body| body.len())
+        })
+        .sum();
+    let tokens = read.saturating_sub(answer.len()) / CHARS_PER_TOKEN;
+    gain::record(state_dir, gain::Basis::LocalAnswer, tokens as u64);
 }
 
 fn tool_list() -> Value {
@@ -395,8 +373,8 @@ fn handle_message(tools: &dyn Tools, message: &Value) -> Option<Value> {
 }
 
 /// `ccc mcp`: serves the tools over stdio for as long as the client stays connected.
-pub(crate) fn mcp(args: &EmbedArgs) -> anyhow::Result<()> {
-    let models = args.local.models()?;
+pub(crate) fn mcp(args: &LocalArgs) -> anyhow::Result<()> {
+    let models = Models::new(&args.state.dir()?)?;
     let mut out = std::io::stdout();
     for line in std::io::stdin().lock().lines() {
         let line = line.context("reading from the client")?;

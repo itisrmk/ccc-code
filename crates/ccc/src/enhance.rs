@@ -72,15 +72,8 @@ pub(crate) fn context_for(
     Ok(Some(hint_text(&described)))
 }
 
-#[cfg(feature = "local-model")]
 fn vectors_for(state_dir: &Path, root: &Path, prompt: &str) -> Vec<String> {
     crate::local_work::vector_files(state_dir, root, prompt, RANKING_DEPTH)
-}
-
-/// Without the model build, keywords carry on alone.
-#[cfg(not(feature = "local-model"))]
-fn vectors_for(_: &Path, _: &Path, _: &str) -> Vec<String> {
-    Vec::new()
 }
 
 /// Handles the hook. Nothing here may get in the way of a prompt, so any failure just adds

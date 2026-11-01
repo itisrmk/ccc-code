@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "ccc": { "type": "stdio", "command": "${CLAUDE_PLUGIN_ROOT}/bin/ccc-run", "args": ["mcp"] }
+  }
+}

@@ -874,6 +874,110 @@ def scenario_mcp(box):
     return "Claude called local search and answered from its result"
 
 
+def scenario_setup(box):
+    """A clean install under a throwaway home: settings, status line and full removal."""
+    home = box.base / "home"
+    (home / ".claude").mkdir(parents=True)
+    settings = home / ".claude" / "settings.json"
+    original = {"permissions": {"allow": []}}
+    settings.write_text(json.dumps(original))
+    env = {**os.environ, "HOME": str(home)}
+    # A server that isn't there, so this needs no download and no real model.
+    done = subprocess.run(
+        [str(CCC), "setup", "--server", "http://127.0.0.1:9/v1", "--embedding-model", "x", "--no-mcp"],
+        env=env, cwd=box.work, capture_output=True, text=True, timeout=60,
+    )
+    check(done.returncode == 0, f"setup failed: {done.stderr[-400:]}")
+    wired = json.loads(settings.read_text())
+    check(set(wired["hooks"]) == {"SessionStart", "UserPromptSubmit"}, f"hooks: {wired['hooks']}")
+    check("statusline" in wired["statusLine"]["command"], f"status line: {wired}")
+    doctor = subprocess.run(
+        [str(CCC), "doctor", "--no-start"], env=env, cwd=box.work,
+        capture_output=True, text=True, timeout=60,
+    )
+    check("Cost warnings are on" in doctor.stdout, f"doctor: {doctor.stdout}")
+    sample = json.dumps({"rate_limits": {"seven_day": {"used_percentage": 62}}})
+    line = subprocess.run(
+        [str(CCC), "statusline"], input=sample, env={**env, "NO_COLOR": "1"},
+        capture_output=True, text=True, timeout=10,
+    )
+    check(line.stdout.strip() == "week limit 62%", f"status line said {line.stdout!r}")
+    removed = subprocess.run(
+        [str(CCC), "uninstall", "--purge", "--no-mcp"], env=env, cwd=box.work,
+        capture_output=True, text=True, timeout=60,
+    )
+    check(removed.returncode == 0, f"uninstall failed: {removed.stderr[-400:]}")
+    check(json.loads(settings.read_text()) == original, "settings weren't restored")
+    check(not (home / ".ccc").exists(), "the state directory is still there")
+    check(not any(home.joinpath(".claude").glob("*ccc*")), "a leftover file remains")
+    return "installed, reported healthy, and left nothing behind"
+
+
+def scenario_status_line(box):
+    """The real TUI shows our status line, built from what Claude Code really sends."""
+    captured = box.base / "status-input.jsonl"
+    settings_file = box.base / "settings.json"
+    settings_file.write_text(json.dumps({"statusLine": {
+        "type": "command",
+        "command": (
+            f"tee -a {shlex.quote(str(captured))} | NO_COLOR=1 "
+            f"{shlex.quote(str(CCC))} statusline --state-dir {shlex.quote(str(box.state))}"
+        ),
+    }}))
+    terminal = Terminal(["claude", "--model", MODEL, "--settings", str(settings_file)], box.work)
+    try:
+        # The trust question can take a while on a busy machine, and typing into it does nothing.
+        terminal.wait_for(r"Yes, I trust this folder|shift\+tab", 30)
+        for _ in range(5):
+            if "Yes, I trust this folder" not in terminal.screen():
+                break
+            terminal.press("Down")
+            time.sleep(0.5)
+            terminal.press("Enter")
+            time.sleep(3)
+        time.sleep(3)
+        terminal.type("Reply with only the word ok.")
+        time.sleep(1)
+        terminal.press("Enter")
+        shown = terminal.wait_for(r"context \d+", 45)
+        screen = terminal.screen()
+    finally:
+        terminal.close()
+    check(captured.exists(), f"Claude Code never ran the status line:\n{screen[-900:]}")
+    last = json.loads(captured.read_text().splitlines()[-1])
+    check(shown, f"not on screen. It sent {sorted(last)}, usage {last.get('context_window')}:\n{screen[-500:]}")
+    line = next(line.strip() for line in screen.splitlines() if re.search(r"context \d+", line))
+    return f"on screen: {line[:80]}"
+
+
+def scenario_service_recovers(box):
+    """Killing the service never hurts a prompt: the hook still answers, quickly."""
+    write_auth_repo(box)
+    state = box.state
+    state.mkdir(exist_ok=True)
+    config = state / "config.toml"
+    config.write_text('server_url = "http://127.0.0.1:9/v1"\nembedding = "x"\n')
+    event = json.dumps({"session_id": "s", "cwd": str(box.work), "prompt": "verify session token rules"})
+
+    def hook():
+        started = time.time()
+        done = subprocess.run(
+            [str(CCC), "hook", "enhance-prompt", "--state-dir", str(state)],
+            input=event, capture_output=True, text=True, timeout=30,
+        )
+        check(done.returncode == 0, f"a hook failed a prompt: {done.stderr[-300:]}")
+        return done.stdout, time.time() - started
+
+    first, _ = hook()
+    check("gatekeeper.py" in first, f"no context: {first}")
+    subprocess.run(["pkill", "-9", "-f", f"daemon --state-dir {state}"], capture_output=True)
+    second, seconds = hook()
+    check("gatekeeper.py" in second, f"no context after the kill: {second}")
+    check(seconds < 5, f"the hook took {seconds:.1f}s")
+    subprocess.run(["pkill", "-f", f"daemon --state-dir {state}"], capture_output=True)
+    return f"still answered {seconds:.2f}s after the service was killed"
+
+
 def free_port():
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -1039,6 +1143,8 @@ def main():
         except (Failed, subprocess.TimeoutExpired, ValueError, KeyError) as err:
             failures += 1
             print(f"FAIL {name}: {err}")
+    # A session killed with its terminal can still be writing its transcript for a moment.
+    time.sleep(2)
     forget_transcripts(base)
     shutil.rmtree(base, ignore_errors=True)
     print(f"{len(chosen) - failures} of {len(chosen)} scenarios passed")

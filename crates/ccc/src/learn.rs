@@ -44,7 +44,6 @@ pub(crate) fn index_cache_path(state_dir: &Path, root: &Path) -> PathBuf {
 }
 
 /// Where a repository's vectors are cached, inside the state directory.
-#[cfg(feature = "local-model")]
 pub(crate) fn semantic_cache_path(state_dir: &Path, root: &Path) -> PathBuf {
     let safe = index_cache_path(state_dir, root);
     safe.with_extension("vectors.json")

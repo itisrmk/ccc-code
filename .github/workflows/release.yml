@@ -1,4 +1,5 @@
-# Builds binaries when a version tag is pushed, without the optional local model features.
+# Builds binaries when a version tag is pushed, with the local model runner. Name detection stays
+# out, since it needs its own runtime.
 name: release
 
 on:

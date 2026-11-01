@@ -52,6 +52,9 @@ Live scenarios (`scripts/live_test.py --list`):
 - `verify`: `ccc verify` passes `ccc`'s own proxy, free
 - `gateway_chain`: Claude Code through a gateway to an enforcing `ccc` to the real API
 - `eval`: `ccc eval` mines a commit and scores a real agent by running the tests
+- `setup`: a clean install under a throwaway home reports healthy and leaves nothing behind
+- `status_line`: the real TUI shows our status line
+- `service_recovers`: killing the background service never hurts a prompt
 - `init`: `ccc init` writes hooks that really warn, and removes them again, leaving other settings
 - `handoff`: a fresh session given only `ccc handoff` knows what the first session was told
 - `enhance`: the prompt hook adds files as context, leaves the person's words alone, and stays valid
@@ -64,6 +67,10 @@ Newest first. Record what was tested, what happened and any real finding. Number
 
 ### 2026-11-01
 
+- Phase 1 of the product plan: `ccc setup`, `uninstall`, `doctor`, `status`, `gain`, a status line, a background service, an Ollama and LM Studio backend, a plugin and `install.sh`. A clean install under a throwaway home took 28 s with the 2.8 GB model left downloading in the background, against 239 s waiting for it. Service memory 455 MB with embeddings loaded, 2,755 MB with Gemma too. A hook answered in 0.36 s with the service killed. The real TUI showed `week limit 35% · cache 1h0m · context 44K`, from a real session.
+- `ccc uninstall` restored settings exactly once a real comparison ruled out a false alarm: `claude mcp add` itself rewrites `"opus"` to `"opus[1m]"`.
+- A real redaction limit, seen once in 4 runs of `policy`: Haiku replied with a mangled placeholder, `<be6vzn1v-codename>`, built from the temporary path, which can't be turned back into the real value. The value stayed local, so it fails safe, but the person sees nonsense.
+- `v0.1.1` was refused by the permission classifier as a new public surface, so Apple Silicon still has no prebuilt binary. Pushing a tag is the user's to do.
 - Published to https://github.com/itisrmk/ccc-code at the user's go-ahead. History scanned first: no private paths or project names, and the only key-shaped strings are fake ones in tests. First CI run passed, and `cargo install --git` from the public repo builds and runs. Not released: no tag, npm package or Homebrew formula yet, so `.github/workflows/release.yml` hasn't run. The user chose not to run downloaded code, so `ccc verify` hasn't met a third-party gateway.
 - First `ccc eval` on a real repository, one of the author's own Rust projects: 160 commits gave 7 tasks with limits of 400 lines and 6 files, 2 with 120 lines and 3 files, and 17 commits failed their own tests. Haiku, 21 runs, $0.65: plain 7/7, "never run tests" 1/7 in 2.0 turns against 20.1, enhanced 5/7 at 62% more cost. Sonnet, 14 runs, $2.66: plain 6/7, enhanced 5/7 at 9% less. One repetition each. Enhancement never passed more tasks, so it stays off and the README says so. Pass-rate differences missed the bar because 7 tasks with a tie can't go below p = 0.03. Keep results from private repositories out of this repo: `target/experiment/own` is ignored for that reason.
 - Restart test at scale (`scripts/restart_test.py --large`), real runs: Sonnet $3.70 against $5.13 (-28%, 2 runs per arm, peak 271K against 522K, one restart). Haiku $1.76 against $2.15 (-18%, 1 run per arm, peak 530K against 947K). Every run passed 12/12 modules, followed the first prompt's rule, and logged every ticket from notes it had to read. Small runs and large runs disagree because each restart rewrites the cache, so it only pays once context is large. Tasks are independent, which flatters a restart. About $22 at list prices.

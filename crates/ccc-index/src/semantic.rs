@@ -108,6 +108,22 @@ impl SemanticIndex {
         root: &Path,
         embed: &mut dyn FnMut(&str) -> Result<Vec<f32>, E>,
     ) -> Result<usize, E> {
+        self.refresh_within(root, usize::MAX, embed)
+    }
+
+    /// Like [`SemanticIndex::refresh`], embedding at most `budget` new chunks. The rest stay out
+    /// of the index until a later call, so a huge repository can be worked through in the
+    /// background a little at a time.
+    ///
+    /// # Errors
+    ///
+    /// Returns the embedder's first error. The index keeps what it had before the call.
+    pub fn refresh_within<E>(
+        &mut self,
+        root: &Path,
+        budget: usize,
+        embed: &mut dyn FnMut(&str) -> Result<Vec<f32>, E>,
+    ) -> Result<usize, E> {
         let known: HashMap<u64, &Chunk> = self.chunks.iter().map(|c| (c.key, c)).collect();
         let mut chunks = Vec::new();
         let mut embedded = 0;
@@ -135,6 +151,7 @@ impl SemanticIndex {
                 let key = chunk_key(&file, &text);
                 let vector = match known.get(&key) {
                     Some(chunk) => chunk.vector.clone(),
+                    None if embedded >= budget => continue,
                     None => {
                         embedded += 1;
                         embed(&document_text(&file, &text))?
@@ -329,6 +346,18 @@ mod tests {
         fs::remove_file(root.join("src/auth.rs")).unwrap();
         index.refresh(&root, &mut fake_embed).unwrap();
         assert_eq!(index.len(), 1, "deleted files leave the index");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_budget_limits_each_pass_and_later_passes_carry_on() {
+        let root = repo("budget");
+        let mut index = SemanticIndex::default();
+        assert_eq!(index.refresh_within(&root, 1, &mut fake_embed).unwrap(), 1);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index.refresh_within(&root, 1, &mut fake_embed).unwrap(), 1);
+        assert_eq!(index.len(), 2, "the first chunk was kept and another added");
+        assert_eq!(index.refresh_within(&root, 1, &mut fake_embed).unwrap(), 0);
         fs::remove_dir_all(&root).unwrap();
     }
 

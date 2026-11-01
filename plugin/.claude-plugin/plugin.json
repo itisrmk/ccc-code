@@ -1,0 +1,10 @@
+{
+  "name": "ccc-code",
+  "displayName": "ccc-code",
+  "description": "Cost warnings, one-command restarts and local code search, with a small model on your machine",
+  "version": "0.1.1",
+  "author": { "name": "Rahul Kashyap" },
+  "homepage": "https://github.com/itisrmk/ccc-code",
+  "repository": "https://github.com/itisrmk/ccc-code",
+  "license": "MIT"
+}

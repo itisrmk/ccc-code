@@ -1,6 +1,6 @@
 [package]
 name = "ccc"
-description = "See what Claude Code really costs, and test what helps"
+description = "Make your Claude limit last longer, with a small model on your machine"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,6 +12,7 @@ name = "ccc"
 path = "src/main.rs"
 
 [features]
+default = ["local-model"]
 local-model = ["ccc-slm/llama"]
 ner = ["dep:ccc-ner"]
 
@@ -34,7 +35,10 @@ ccc-slm.workspace = true
 ccc-verify.workspace = true
 ccc-wire.workspace = true
 clap.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 toml.workspace = true
 tokio.workspace = true
 tracing.workspace = true

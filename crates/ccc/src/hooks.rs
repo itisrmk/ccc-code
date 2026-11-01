@@ -85,6 +85,9 @@ pub(crate) fn handle(
     // These only warn, so `ccc init` adds nothing else to every session.
     if matches!(event, "advise-session-start" | "advise-prompt") {
         let options = advice.unwrap_or(DEFAULT_ADVICE);
+        if event == "advise-session-start" {
+            index_in_background(state_dir, field("cwd"));
+        }
         let moment = match event {
             "advise-prompt" => Moment::Prompt,
             _ if field("source") == "resume" => Moment::Resume,
@@ -139,6 +142,37 @@ pub(crate) fn handle(
         // Logged above; the docs offer no way to add compaction instructions from here.
         "pre-compact" => Ok(()),
         other => anyhow::bail!("unknown hook event {other:?}"),
+    }
+}
+
+/// Keeps a repository's vectors current without holding up the session. Only for repositories,
+/// since nobody wants a home directory embedded, and only once a model is there to do it.
+fn index_in_background(state_dir: &Path, cwd: &str) {
+    let root = Path::new(cwd);
+    if cwd.is_empty() || !root.join(".git").exists() {
+        return;
+    }
+    let Ok(config) = crate::config::LocalConfig::load(state_dir) else {
+        return;
+    };
+    let has_model = matches!(config.backend, crate::config::Backend::Server { .. })
+        || crate::config::LocalConfig::model_file(state_dir, &config.embedding).exists();
+    if !has_model {
+        return;
+    }
+    let Ok(ccc) = std::env::current_exe() else {
+        return;
+    };
+    let spawned = Process::new(ccc)
+        .args(["embed", "--budget", "2000", "--state-dir"])
+        .arg(state_dir)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    if let Err(err) = spawned {
+        tracing::warn!(error = %err, "could not start indexing");
     }
 }
 

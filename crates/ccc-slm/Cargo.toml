@@ -13,10 +13,16 @@ llama = ["dep:llama-cpp-2"]
 [dependencies]
 ccc-pipeline.workspace = true
 ccc-wire.workspace = true
-llama-cpp-2 = { version = "0.1", optional = true, default-features = false, features = ["metal"] }
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+ureq = { version = "3", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+llama-cpp-2 = { version = "0.1", optional = true, default-features = false, features = ["metal"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+llama-cpp-2 = { version = "0.1", optional = true, default-features = false }
 
 [lints]
 workspace = true

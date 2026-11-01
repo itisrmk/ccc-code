@@ -5,6 +5,12 @@ on:
   pull_request:
 
 jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release -p ccc
+      - run: cargo test -p ccc -p ccc-slm -p ccc-index
   check:
     runs-on: macos-latest
     steps:

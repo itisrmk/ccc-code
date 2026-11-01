@@ -75,7 +75,6 @@ pub trait Embedder: Send + Sync + Debug {
 }
 
 /// Scales `vector` to length 1, so a dot product is a cosine similarity.
-#[cfg(any(feature = "llama", test))]
 pub(crate) fn normalized(mut vector: Vec<f32>) -> Vec<f32> {
     let length = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
     if length > 0.0 {
