@@ -24,6 +24,8 @@ Run these after every change. Add a line to the log below for each phase or real
 
 Build first with `cargo build --release -p ccc --features local-model,ner`, so the model scenarios can run. They skip themselves without the feature or the weights in `~/.ccc/models`, fetched with `scripts/fetch-models.sh`. `ccc model-bench FILE --transcripts DIR` measures a model on this machine. `CCC_LIVE_MODEL=claude-opus-5-5` runs the live tests on another model; it costs about $0.20 per scenario for the first cache write.
 
+`scripts/restart_test.py` measures restarting against one long session, with real runs. `ccc enrich-eval DIR --embedding-model FILE --rerank-model FILE` measures file suggestions on real history, free. Keep experiment output in `target/experiment` or `docs/results`, since the session scratchpad doesn't survive.
+
 `ccc eval` tests Claude Code setups. `scripts/eval_fixture.py DIR` builds a task repository from this project's own synthetic bugs, so no outside code runs: `ccc eval mine DIR --test "python3 run_tests.py" --out tasks.json`, then `ccc eval run`. About $0.005 per run on Haiku.
 
 `scripts/e2e.py` measures task success (Gate 3): real Claude Code fixing small synthetic bugs with and without `ccc`, scored by running the tests afterward. About $0.02 per run on Haiku and $0.15 on Sonnet. `--check-tasks` confirms each task starts out failing, free.
@@ -50,6 +52,11 @@ Live scenarios (`scripts/live_test.py --list`):
 - `verify`: `ccc verify` passes `ccc`'s own proxy, free
 - `gateway_chain`: Claude Code through a gateway to an enforcing `ccc` to the real API
 - `eval`: `ccc eval` mines a commit and scores a real agent by running the tests
+- `init`: `ccc init` writes hooks that really warn, and removes them again, leaving other settings
+- `handoff`: a fresh session given only `ccc handoff` knows what the first session was told
+- `enhance`: the prompt hook adds files as context, leaves the person's words alone, and stays valid
+- `ask`: `ccc ask` answers from local code with real weights, offline
+- `mcp`: Claude really calls the local search tool and uses what it finds
 
 ## Log
 
@@ -57,7 +64,13 @@ Newest first. Record what was tested, what happened and any real finding. Number
 
 ### 2026-11-01
 
-- Final run on this work: `scripts/check.sh` passed with 302 tests, and 19 of 20 live scenarios passed with the 20th, Codex, skipped because it spends ChatGPT quota and no proxy code changed. Full pipeline 2, 11 and 59 ms at 1, 4 and 16 MB.
+- Prompt enhancement on the 12 synthetic tasks: Haiku cost 14% less and took 4.2 turns against 4.7 (p = 0.003, 0.017, over 72 pairs, extended after a first look, so somewhat optimistic). Sonnet cost 14% more and took 4.8 turns against 3.1 (p = 0.0005, 0.001, over 24 pairs). All passed. Same feature, opposite results, so it's off by default. Why Sonnet does worse wasn't investigated.
+- File suggestions on 106 real prompts: keywords 20.8% hit at 3, EmbeddingGemma 25.5%, both 28.3%, past sessions plus keywords 45.3%, all three by rank fusion 40.6%, reordered by Gemma 4 E2B 37.7% in 638 ms, by Qwen3-4B 32.1% in 1.19 s. Reordering hurts and embeddings don't improve on past sessions, so enhancement uses vectors only without history and no model chooses files.
+- llama-cpp-2 0.1.160, the latest, can't load EmbeddingGemma 2 (`gemma-embedding2`, "null result from llama cpp"), so the first EmbeddingGemma is used, under Gemma terms. Gemma 2 is superseded: Gemma 4 E2B is Apache 2.0 and the bundled llama.cpp loads it. The shared llama backend is now process-wide, since it can only be set up once.
+- Restart test, real runs, 12 tasks, restarting every 4: Haiku $0.0288 against $0.0304 (-5%, 6 runs per arm), Sonnet $0.4256 against $0.3672 (+16%, 3 runs). 12/12 modules and 12/12 of a rule from the first prompt in every run, so the handoff lost nothing. Peak context was only 55K, far from the 300K where `whatif` simulates savings, so those stay unproven.
+- `claude -p --output-format json` reports a running total on resume. Summing it made a pilot look 60% cheaper ($0.20 against $0.08) when the real gap was 5%. Score cost from recorded usage.
+- `ccc eval report` used whichever setup finished first as its baseline, which printed a comparison backward. The baseline is now the first setup given.
+- Final run on this work: `scripts/check.sh` passed with 333 tests, and 24 of 25 live scenarios passed with the 25th, Codex, skipped because it spends ChatGPT quota and no proxy code changed. Full pipeline 2, 11 and 46 ms at 1, 4 and 16 MB.
 - Added `ccc eval`. On 12 synthetic tasks, 3 repetitions, Haiku, 180 runs, $0.90: an identical copy showed no false alarm. A wasteful `CLAUDE.md` was caught on cost (2.2 times) and turns (27.6 vs 4.5), p = 0.0005. A read-only one was caught on pass rate (0% vs 100%), p = 0.0005. "Never run tests" wasn't caught (94.4% vs 100%), because Haiku solves these tasks without testing. Large effects only; small ones on real work are unproven.
 - `ccc eval` called "never run tests" BETTER on cost, because giving up early is cheap. The report now warns when lower cost comes with fewer passes.
 - A first `ccc eval` run on real `more-itertools` history left 63 folders in `~/.claude/projects`: Claude Code makes one per working directory even with `--no-session-persistence`. Removed them, and `ccc eval` now removes its own. Its results were lost with the temporary directory when the session ended, and the rerun was refused by the permission classifier because it executes downloaded code. So nothing here is measured on a real repository's history. Keep experiment output somewhere durable.

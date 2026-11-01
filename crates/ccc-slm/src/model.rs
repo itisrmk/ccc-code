@@ -62,3 +62,38 @@ pub trait TextModel: Send + Sync + Debug {
     /// Returns [`ModelError`] if the model fails or misses the deadline.
     fn complete(&self, request: &CompletionRequest<'_>) -> Result<Completion, ModelError>;
 }
+
+/// Anything that can turn text into a vector. Calls block, like [`TextModel`]'s. Tests use a
+/// fake, since real weights are hundreds of megabytes.
+pub trait Embedder: Send + Sync + Debug {
+    /// Embeds `text`, returning a vector of length 1.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelError`] if the model fails.
+    fn embed(&self, text: &str) -> Result<Vec<f32>, ModelError>;
+}
+
+/// Scales `vector` to length 1, so a dot product is a cosine similarity.
+#[cfg(any(feature = "llama", test))]
+pub(crate) fn normalized(mut vector: Vec<f32>) -> Vec<f32> {
+    let length = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if length > 0.0 {
+        for value in &mut vector {
+            *value /= length;
+        }
+    }
+    vector
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizing_gives_length_one_and_leaves_zero_alone() {
+        let vector = normalized(vec![3.0, 4.0]);
+        assert!((vector[0] - 0.6).abs() < 1e-6 && (vector[1] - 0.8).abs() < 1e-6);
+        assert_eq!(normalized(vec![0.0, 0.0]), [0.0, 0.0]);
+    }
+}

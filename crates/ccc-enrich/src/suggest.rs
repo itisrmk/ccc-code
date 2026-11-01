@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use ccc_index::Index;
+use ccc_index::{Index, IndexError};
 use ccc_learn::Memory;
 
 /// Marks hints in a prompt, so they read as context and not as the user's words.
@@ -38,6 +38,28 @@ impl Suggester {
         let parsed = index.refresh(&self.root);
         *self.index.lock().expect("lock poisoned") = index;
         parsed
+    }
+
+    /// Saves the index, so the next start doesn't parse everything again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IndexError`] if the file can't be written.
+    pub fn save_index(&self, path: &Path) -> Result<(), IndexError> {
+        self.index.lock().expect("lock poisoned").save(path)
+    }
+
+    /// Up to `limit` names defined in `file`.
+    #[must_use]
+    pub fn symbols_of(&self, file: &str, limit: usize) -> Vec<String> {
+        self.index
+            .lock()
+            .expect("lock poisoned")
+            .symbols_in(file)
+            .iter()
+            .take(limit)
+            .map(|symbol| symbol.name.clone())
+            .collect()
     }
 
     /// The likeliest files for `prompt`, best first.

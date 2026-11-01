@@ -4,12 +4,17 @@ mod advise;
 mod bench;
 mod clients;
 mod dashboard;
+mod enhance;
 mod eval;
 mod export;
+mod handoff;
 mod hooks;
+mod init;
 mod learn;
 #[cfg(feature = "local-model")]
 mod local_models;
+#[cfg(feature = "local-model")]
+mod local_work;
 #[cfg(feature = "local-model")]
 mod model_bench;
 #[cfg(feature = "ner")]
@@ -75,6 +80,11 @@ enum Command {
     Whatif(WhatifArgs),
     /// Test whether a Claude Code setup really helps, on tasks from a repository's own history.
     Eval(eval::EvalArgs),
+    /// Turn on cost warnings for Claude Code, by adding hooks to its settings.
+    Init(init::InitArgs),
+    /// Write what a fresh session needs from this one, and optionally start it. Costs nothing
+    /// and calls no model until the new session starts.
+    Handoff(handoff::HandoffArgs),
     /// Check whether a gateway is safe to put between Claude Code and the API. Needs no API
     /// key: the gateway forwards to a recording stand-in, and nothing leaves the machine.
     Verify(verify::VerifyArgs),
@@ -94,6 +104,19 @@ enum Command {
     RouterTrain(RouterTrainArgs),
     /// Serve a page of recent sessions' costs on this machine.
     Dashboard(DashboardArgs),
+    /// Show the context prompt enhancement would add to a prompt. Costs nothing.
+    Enhance(EnhanceArgs),
+    /// Build this directory's vectors for search by meaning. Needs the local-model build feature.
+    #[cfg(feature = "local-model")]
+    Embed(local_work::EmbedArgs),
+    /// Ask a local model about the code in this directory. Free, and nothing leaves the machine.
+    /// Needs the local-model build feature.
+    #[cfg(feature = "local-model")]
+    Ask(local_work::AskArgs),
+    /// Serve local code search and questions as tools for Claude, over MCP on stdio. Needs the
+    /// local-model build feature.
+    #[cfg(feature = "local-model")]
+    Mcp(local_work::EmbedArgs),
     /// Measure the name-detection model on files in a directory. Needs the ner build feature.
     #[cfg(feature = "ner")]
     NerBench(NerBenchArgs),
@@ -308,6 +331,12 @@ fn enrich_stage(state_dir: &std::path::Path, cap_ms: u64) -> anyhow::Result<Enri
     Ok(Enrich::new(suggester, None, config))
 }
 
+/// Claude Code's own directory.
+fn claude_home() -> anyhow::Result<PathBuf> {
+    let home = std::env::var_os("HOME").context("HOME isn't set")?;
+    Ok(PathBuf::from(home).join(".claude"))
+}
+
 fn default_state_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ccc"))
 }
@@ -383,10 +412,22 @@ struct BenchArgs {
 }
 
 #[derive(Debug, Args)]
+struct EnhanceArgs {
+    /// The prompt to try.
+    #[arg(value_name = "PROMPT")]
+    prompt: String,
+    #[command(flatten)]
+    state: StateArgs,
+}
+
+#[derive(Debug, Args)]
 struct WhatifArgs {
-    /// Directory of Claude Code transcripts, normally ~/.claude/projects.
+    /// Directory of Claude Code transcripts. Defaults to ~/.claude/projects.
     #[arg(value_name = "DIR")]
-    transcripts: PathBuf,
+    transcripts: Option<PathBuf>,
+    /// Print only one line of totals, to share if you choose.
+    #[arg(long)]
+    share: bool,
     /// Also write the results as numbers only, to read and share if you choose. Holds no
     /// prompts, paths, output or session ids, and nothing is sent anywhere.
     #[arg(long, value_name = "FILE")]
@@ -451,6 +492,22 @@ struct EnrichEvalArgs {
     /// Directory of Claude Code transcripts, normally ~/.claude/projects.
     #[arg(value_name = "DIR")]
     transcripts: PathBuf,
+    /// Also judge search by meaning, with this GGUF embedding model. Needs the local-model
+    /// build feature.
+    #[cfg(feature = "local-model")]
+    #[arg(long, value_name = "FILE")]
+    embedding_model: Option<PathBuf>,
+    /// Also judge letting this GGUF model order the candidates. Needs --embedding-model.
+    #[cfg(feature = "local-model")]
+    #[arg(long, value_name = "FILE", requires = "embedding_model")]
+    rerank_model: Option<PathBuf>,
+    /// The reranking model's prompt format, qwen or gemma4.
+    #[cfg(feature = "local-model")]
+    #[arg(long, value_name = "FORMAT", default_value = "gemma4")]
+    rerank_format: String,
+    #[cfg(feature = "local-model")]
+    #[command(flatten)]
+    state: StateArgs,
 }
 
 #[derive(Debug, Args)]
@@ -575,6 +632,26 @@ async fn main() -> anyhow::Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::EnrichEval(args) => {
+            #[cfg(feature = "local-model")]
+            {
+                let state_dir = args.state.dir()?;
+                let format = match args.rerank_format.as_str() {
+                    "gemma4" => ccc_slm::ChatFormat::Gemma4,
+                    "qwen" => ccc_slm::ChatFormat::Qwen,
+                    other => anyhow::bail!("unknown prompt format {other:?}"),
+                };
+                let reranker = args.rerank_model.as_deref().map(|path| (path, format));
+                let vectors = args
+                    .embedding_model
+                    .as_deref()
+                    .map(|model| learn::VectorEval {
+                        model,
+                        reranker,
+                        state_dir: &state_dir,
+                    });
+                learn::enrich_eval(&args.transcripts, vectors.as_ref())?;
+            }
+            #[cfg(not(feature = "local-model"))]
             learn::enrich_eval(&args.transcripts)?;
             Ok(ExitCode::SUCCESS)
         }
@@ -600,9 +677,39 @@ async fn main() -> anyhow::Result<ExitCode> {
             eval::command(&args)?;
             Ok(ExitCode::SUCCESS)
         }
+        Command::Enhance(args) => {
+            let added = enhance::hook(&args.state.dir()?, ".", &args.prompt);
+            let text = added.unwrap_or_else(|| "Nothing to add for that prompt.".to_owned());
+            writeln!(std::io::stdout(), "{text}")?;
+            Ok(ExitCode::SUCCESS)
+        }
+        #[cfg(feature = "local-model")]
+        Command::Embed(args) => {
+            local_work::embed(&args)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        #[cfg(feature = "local-model")]
+        Command::Ask(args) => {
+            local_work::ask(&args)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        #[cfg(feature = "local-model")]
+        Command::Mcp(args) => {
+            local_work::mcp(&args)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Init(args) => {
+            init::run(&args, &claude_home()?)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Handoff(args) => handoff::run(&args, &claude_home()?),
         Command::Verify(args) => verify::run(&args).await,
         Command::Whatif(args) => {
-            whatif::run(&args.transcripts, args.export.as_deref())?;
+            let transcripts = match args.transcripts {
+                Some(path) => path,
+                None => claude_home()?.join("projects"),
+            };
+            whatif::run(&transcripts, args.export.as_deref(), args.share)?;
             Ok(ExitCode::SUCCESS)
         }
     }

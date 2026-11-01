@@ -74,11 +74,60 @@ fn top_share(report: &Spend, count: usize) -> f64 {
     )
 }
 
-pub(crate) fn run(transcripts: &Path, export: Option<&Path>) -> anyhow::Result<()> {
+/// The restart the headline quotes: a size that's clearly large, and a handoff plus some re-reading.
+const HEADLINE_ABOVE: u64 = 300_000;
+const HEADLINE_RESTORED: u64 = 50_000;
+
+/// One line that says what matters, and that holds nothing but totals.
+fn headline(results: &Results) -> Option<String> {
+    let total = results.spend.total_usd;
+    let (_, outcome) = results
+        .restarts
+        .iter()
+        .find(|row| row.above_tokens == HEADLINE_ABOVE)?
+        .outcomes
+        .iter()
+        .find(|(restored, _)| *restored == HEADLINE_RESTORED)?;
+    if total <= 0.0 || outcome.restarts == 0 || outcome.cost_usd >= total {
+        return None;
+    }
+    Some(format!(
+        "${total:.0} of Claude Code at list prices. {:.0}% of it was calls over {}K tokens of \
+         context. Restarting at that size would have cost at most ${:.0} less.",
+        share(
+            results
+                .spend
+                .bands
+                .iter()
+                .filter(|band| band.from_tokens >= HEADLINE_ABOVE)
+                .map(|band| band.cost_usd)
+                .sum(),
+            total
+        ),
+        HEADLINE_ABOVE / 1000,
+        total - outcome.cost_usd,
+    ))
+}
+
+pub(crate) fn run(
+    transcripts: &Path,
+    export: Option<&Path>,
+    share_line: bool,
+) -> anyhow::Result<()> {
     let timelines = load_timelines(transcripts)
         .with_context(|| format!("loading transcripts from {}", transcripts.display()))?;
     let results = measure(&timelines);
-    print_report(&mut std::io::stdout(), &results)?;
+    let mut out = std::io::stdout();
+    if share_line {
+        let line = headline(&results)
+            .unwrap_or_else(|| "No sessions large enough for a restart to help.".to_owned());
+        writeln!(out, "{line}")?;
+        return Ok(());
+    }
+    if let Some(line) = headline(&results) {
+        writeln!(out, "{line}\n")?;
+    }
+    print_report(&mut out, &results)?;
     if let Some(path) = export {
         let text =
             serde_json::to_string_pretty(&export_json(&results)).context("rendering export")?;
@@ -235,7 +284,7 @@ fn export_json(results: &Results) -> Value {
         "ccc_version": env!("CARGO_PKG_VERSION"),
         "calls": report.calls,
         "sessions": report.sessions,
-        "total_usd": rounded(total),
+        "total_usd": (total * 10_000.0).round() / 10_000.0,
         "top_session_share": rounded(top_share(report, 1)),
         "top_two_share": rounded(top_share(report, 2)),
         "read_share": rounded(share(report.read_usd, total)),
@@ -303,5 +352,8 @@ mod tests {
         assert!(!exported.contains("canary"), "{exported}");
         assert!(!printed.contains("canary"), "{printed}");
         assert!(exported.contains("\"restarts\""), "{exported}");
+        let line = headline(&results).unwrap();
+        assert!(line.contains("at most"), "{line}");
+        assert!(!line.contains("canary"), "{line}");
     }
 }

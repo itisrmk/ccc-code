@@ -1,6 +1,6 @@
 #!/bin/sh
 # Downloads optional local models to ~/.ccc/models and checks them against pinned hashes.
-# Usage: scripts/fetch-models.sh classifier-small | classifier | ner
+# Usage: scripts/fetch-models.sh classifier-small | classifier | ner | embedding | gemma
 set -eu
 
 fetch() { # repository file sha256 destination
@@ -38,8 +38,20 @@ case "${1:-}" in
             677203884d026e721115cf0daccf70ec4239545a13d6619e3e66d7151e0c9ce3 \
             "$models/gliner/tokenizer.json"
         ;;
+    embedding)
+        # Under Google's Gemma terms. EmbeddingGemma 2 is Apache 2.0, but llama-cpp-2 0.1.160
+        # can't load its gemma-embedding2 architecture yet.
+        fetch ggml-org/embeddinggemma-300M-GGUF embeddinggemma-300M-Q8_0.gguf \
+            b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63 \
+            "$models/embeddinggemma-300M-Q8_0.gguf"
+        ;;
+    gemma)
+        fetch ggml-org/gemma-4-E2B-it-GGUF gemma-4-E2B-it-Q4_0.gguf \
+            8e30dff3ac4c8434c49a7036fa15564bdbb6044e42bf04550bf1a096ad7e6a52 \
+            "$models/gemma-4-E2B-it-Q4_0.gguf"
+        ;;
     *)
-        echo "usage: $0 classifier-small | classifier | ner" >&2
+        echo "usage: $0 classifier-small | classifier | ner | embedding | gemma" >&2
         exit 2
         ;;
 esac

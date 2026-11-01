@@ -719,6 +719,161 @@ def scenario_advise_block(box):
     return "the first prompt was held back with the price, and the second went through"
 
 
+def scenario_init(box):
+    """`ccc init` writes hooks that really warn, and removes them again, leaving other settings."""
+    settings_file = box.base / "settings.json"
+    settings_file.write_text(json.dumps({"permissions": {"allow": []}}))
+    subprocess.run(
+        [str(CCC), "init", "--settings-file", str(settings_file), "--state-dir", str(box.state)],
+        check=True, capture_output=True,
+    )
+    # Warnings stay quiet below 100K tokens, too large for a cheap test, so this lowers the bar
+    # the way a person could with the same flag.
+    text = settings_file.read_text().replace(
+        "--state-dir", "--advise --advise-min-context 1000 --state-dir"
+    )
+    settings_file.write_text(text)
+    first = run_headless(box, "Reply with only the word done.", "--settings", str(settings_file))
+    check(not first["is_error"], f"task errored: {first.get('result')}")
+    age_transcript(box, first["session_id"])
+    done = subprocess.run(
+        ccc_args(box) + [
+            "claude", "-p", "Reply with only the word ok.", "--model", MODEL,
+            "--resume", first["session_id"], "--settings", str(settings_file),
+            "--output-format", "stream-json", "--verbose",
+        ],
+        cwd=box.work, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300,
+    )
+    check("prompt cache expired" in done.stdout, f"no warning shown: {done.stdout[-800:]}")
+    check("ccc handoff --start" in done.stdout, "the warning doesn't name the way out")
+    subprocess.run(
+        [str(CCC), "init", "--settings-file", str(settings_file), "--uninstall"],
+        check=True, capture_output=True,
+    )
+    left = json.loads(settings_file.read_text())
+    check(left == {"permissions": {"allow": []}}, f"uninstall left {left}")
+    return "installed, warned on a real resume, and uninstalled cleanly"
+
+
+def scenario_handoff(box):
+    """A fresh session given only `ccc handoff` knows what the first session was told."""
+    codename = "Project " + "Larkspur"
+    first = run_headless(
+        box,
+        f"This work is called {codename}. Use Bash to create a file notes.txt holding the word "
+        "ready, then reply with only the word done.",
+    )
+    check(not first["is_error"], f"task errored: {first.get('result')}")
+    marker = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(box.work))
+    transcript = Path.home() / ".claude" / "projects" / marker / f"{first['session_id']}.jsonl"
+    handoff = subprocess.run(
+        [str(CCC), "handoff", "--transcript", str(transcript)],
+        capture_output=True, text=True, timeout=60, check=True,
+    ).stdout
+    check(codename in handoff, f"the handoff lost the first request: {handoff[:500]}")
+    second = run_headless(
+        box, f"{handoff}\n\nWhat is this work called? Reply with only its name."
+    )
+    check(second["session_id"] != first["session_id"], "that wasn't a fresh session")
+    check("Larkspur" in second["result"], f"fresh session didn't know: {second['result']}")
+    return f"a fresh session recalled it from {len(handoff)} characters of handoff"
+
+
+def has_model(name):
+    return (Path.home() / ".ccc" / "models" / name).exists()
+
+
+LOCAL_EMBEDDING = "embeddinggemma-300M-Q8_0.gguf"
+LOCAL_GEMMA = "gemma-4-E2B-it-Q4_0.gguf"
+SKIP_NO_LOCAL_WORK = "SKIPPED: needs the local-model build and scripts/fetch-models.sh embedding gemma"
+
+
+def builds_local_work():
+    help_text = subprocess.run([str(CCC), "--help"], capture_output=True, text=True).stdout
+    return " ask " in help_text and has_model(LOCAL_EMBEDDING) and has_model(LOCAL_GEMMA)
+
+
+def write_auth_repo(box):
+    (box.work / "gatekeeper.py").write_text(
+        "def verify_session_token(token):\n    return token.startswith('ok-')\n"
+    )
+    (box.work / "unrelated.py").write_text("def add(a, b):\n    return a + b\n")
+
+
+def scenario_enhance(box):
+    """The prompt hook adds files as context, leaves the person's words alone, and stays valid."""
+    write_auth_repo(box)
+    settings_file = box.base / "settings.json"
+    settings_file.write_text("{}")
+    subprocess.run(
+        [str(CCC), "init", "--enhance", "--settings-file", str(settings_file),
+         "--state-dir", str(box.state)],
+        check=True, capture_output=True,
+    )
+    prompt = "Does verify session token accept empty tokens? Reply with only yes or no."
+    first = run_headless(box, prompt, "--settings", str(settings_file))
+    check(not first["is_error"], f"task errored: {first.get('result')}")
+    second = run_headless(
+        box, "And does verify session token accept ok-1? Reply yes or no.",
+        "--resume", first["session_id"], "--settings", str(settings_file),
+    )
+    check(not second["is_error"], f"resume errored: {second.get('result')}")
+    exchanges = box.exchanges()
+    assert_all_accepted(exchanges)
+    sent = exchanges[-1]["sent_bytes"].decode(errors="ignore")
+    check("gatekeeper.py" in sent, "the suggested file never reached the model")
+    check("verify_session_token" in sent, "the symbol never reached the model")
+    check(prompt in sent, "the person's words were changed")
+    return f"context reached the model across a resume, {len(exchanges)} requests accepted"
+
+
+def scenario_ask(box):
+    """`ccc ask` answers from local code using real weights, with no network service involved."""
+    if not builds_local_work():
+        return SKIP_NO_LOCAL_WORK
+    write_auth_repo(box)
+    done = subprocess.run(
+        [str(CCC), "ask", "Which file checks session tokens?",
+         "--state-dir", str(Path.home() / ".ccc")],
+        cwd=box.work, capture_output=True, text=True, timeout=300,
+        # A dead proxy address: any attempt to reach a service would fail.
+        env={**os.environ, "ANTHROPIC_BASE_URL": "http://127.0.0.1:9", "ANTHROPIC_API_KEY": "x"},
+    )
+    check(done.returncode == 0, f"exit {done.returncode}: {done.stderr[-400:]}")
+    # The list of what it looked at always names the file, so only the answer itself counts.
+    answer = done.stdout.split("Looked at:")[0]
+    check("gatekeeper" in answer, f"wrong answer: {done.stdout[-500:]}")
+    return "answered from local files with real weights, offline"
+
+
+def scenario_mcp(box):
+    """Claude really calls the local search tool, and uses what it finds."""
+    if not builds_local_work():
+        return SKIP_NO_LOCAL_WORK
+    write_auth_repo(box)
+    config = box.base / "mcp.json"
+    config.write_text(json.dumps({"mcpServers": {"ccc": {
+        "type": "stdio", "command": str(CCC),
+        "args": ["mcp", "--state-dir", str(Path.home() / ".ccc")],
+    }}}))
+    done = subprocess.run(
+        ccc_args(box) + [
+            "claude", "-p",
+            "Use the mcp__ccc__search_code tool with the query 'checking session tokens'. "
+            "Reply with only the name of the best matching file.",
+            "--model", MODEL, "--mcp-config", str(config), "--strict-mcp-config",
+            "--allowedTools", "mcp__ccc__search_code", "--output-format", "json",
+        ],
+        cwd=box.work, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300,
+    )
+    check(done.returncode == 0, f"exit {done.returncode}: {done.stderr[-400:]}")
+    result = json.loads(done.stdout)
+    check("gatekeeper" in result["result"], f"wrong answer: {result['result']}")
+    sent = "".join(exchange["sent_bytes"].decode(errors="ignore") for exchange in box.exchanges())
+    check("gatekeeper.py:1" in sent, "the tool's result never reached the model")
+    return "Claude called local search and answered from its result"
+
+
 def free_port():
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))

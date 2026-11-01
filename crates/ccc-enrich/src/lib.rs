@@ -3,10 +3,12 @@
 //! Suggestions change as the index and memory grow, so each one is decided once, for the
 //! newest message, and saved. A later request replays exactly what was sent.
 
+mod rerank;
 mod rewrite;
 mod stage;
 mod suggest;
 
+pub use rerank::{Candidate, rerank};
 pub use rewrite::{GateConfig, gate_rewrite, propose_rewrite};
 pub use stage::{Enrich, EnrichConfig};
 pub use suggest::{Suggester, hint_text};

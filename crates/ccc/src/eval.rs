@@ -267,7 +267,13 @@ fn run_command(args: &RunArgs) -> anyhow::Result<()> {
             records.len()
         )?;
     }
-    print_report(&mut std::io::stdout(), &records, None)
+    // Records land in the order runs finish, so the file can't say which setup came first.
+    let baseline = args
+        .setups
+        .first()
+        .and_then(|text| text.split('=').next())
+        .unwrap_or_default();
+    print_report(&mut std::io::stdout(), &records, Some(baseline))
 }
 
 fn report_command(args: &ReportArgs) -> anyhow::Result<()> {

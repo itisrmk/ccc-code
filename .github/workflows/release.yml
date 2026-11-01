@@ -1,0 +1,37 @@
+# Builds binaries when a version tag is pushed. Not yet run: the repository has no remote. Only
+# Apple Silicon has been tested, so treat the Linux build as unproven until someone runs it.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo test -p ccc -p ccc-bench -p ccc-eval -p ccc-verify
+      # Without the local-model and ner features, which need native builds and model downloads.
+      - run: cargo build --release -p ccc --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          name="ccc-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          tar -czf "$name.tar.gz" -C "target/${{ matrix.target }}/release" ccc
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ccc-*.tar.gz*

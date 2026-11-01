@@ -16,5 +16,5 @@ pub use blob::{
 };
 pub use classify::{Classify, DEFAULT_CLASSIFY_CAP, Difficulty, Intent, Labels, classify_labels};
 #[cfg(feature = "llama")]
-pub use llama::{LlamaConfig, LlamaModel, LoadModelError};
-pub use model::{Completion, CompletionRequest, ModelError, TextModel};
+pub use llama::{ChatFormat, LlamaConfig, LlamaEmbedder, LlamaModel, LoadModelError};
+pub use model::{Completion, CompletionRequest, Embedder, ModelError, TextModel};

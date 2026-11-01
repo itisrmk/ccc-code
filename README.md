@@ -4,11 +4,13 @@ Tools for working out what Claude Code really costs and whether your setup reall
 
 - **`ccc whatif`** shows where your sessions' money went and what restarting or refreshing them would have changed.
 - **`ccc eval`** tests a `CLAUDE.md`, skill or hook on tasks from a repository's history, scored by running the tests.
-- **`--advise`** warns you when a session's cache has expired or its context has grown large, before you pay for it.
+- **`ccc init`** warns you when a session's cache has expired or its context has grown large, before you pay for it, and **`ccc handoff --start`** continues in a fresh session.
+- **`ccc ask`** answers questions about your code with a local model, free and offline. `ccc mcp` offers that to Claude as a tool.
+- **`ccc init --enhance`** adds likely relevant files to each prompt as context, without changing your words. It helped one model and hurt another in testing, so measure it first.
 - **`ccc verify`** checks whether a gateway is safe to put in front of Claude Code.
 - **`ccc run`** is a local proxy that redacts secrets, trims noisy tool output and records costs.
 
-None of these except `ccc run` sits between you and the API, unless you point `ccc verify` at a proxy.
+None of these except `ccc run` and `ccc serve` sits between you and the API, unless you point `ccc verify` at a proxy.
 
 **The proxy doesn't deliver the large token savings it was designed for.** On the author's sessions, trimming cuts context by about 0.6% and cost by about 0.4%. The [results](#results) explain why, and [the write-up](docs/token-savings-writeup.md) goes further. `ccc bench` and `ccc whatif` measure your own sessions.
 
@@ -40,7 +42,10 @@ ccc run --stats --budget-usd 5 -- claude
 ccc stats                               # what recent sessions cost
 ccc dashboard                           # the same, as a page on localhost
 ccc bench ~/.claude/projects            # measure effects on your own sessions, offline
-ccc whatif ~/.claude/projects           # where the money went, and what would change it
+ccc whatif                              # where the money went, and what would change it
+ccc whatif --share                      # the same as one line of totals
+ccc init                                # turn on cost warnings
+ccc handoff --start                     # continue this directory's last session in a fresh one
 ```
 
 ### See where the money went
@@ -50,11 +55,40 @@ ccc whatif ~/.claude/projects           # where the money went, and what would c
 ### Get warned before you pay
 
 ```sh
-ccc hook-settings --advise > ccc-hooks.json
-claude --settings ccc-hooks.json
+ccc init               # adds hooks to ~/.claude/settings.json, keeping a copy of the file
+ccc init --uninstall   # takes them out again
 ```
 
-This warns you once when you resume a session whose cache has expired, with the price of the rewrite, and once each as context passes 300K and 600K tokens. Warnings are shown to you and never reach the model. Add `--advise-block` to hold back the first prompt after an expiry, so you can `/compact` first. Sending it again goes ahead. It stays quiet below 100K tokens, which `--advise-min-context` changes.
+This warns you once when you resume a session whose cache has expired, with the price of the rewrite, and once each as context passes 300K and 600K tokens. Warnings are shown to you and never reach the model. It stays quiet below 100K tokens. For more control, `ccc hook-settings --advise` prints settings for `claude --settings`: `--advise-min-context` changes that size, and `--advise-block` holds back the first prompt after an expiry, so you can `/compact` first. Sending it again goes ahead.
+
+### Restart without retyping
+
+`ccc handoff` builds a summary of a session from its transcript: how the work began, recent requests, files changed and the last thing said. It calls no model, so it's free and instant, and it tells the new session it's partial. `--start` opens Claude Code with it, and `--transcript FILE` picks a session other than this directory's newest.
+
+Restarting isn't automatically cheaper, because a fresh session has to rewrite its cache. See [the results](#does-restarting-really-save-money).
+
+### Use a local model
+
+```sh
+cargo install --path crates/ccc --features local-model
+scripts/fetch-models.sh embedding     # EmbeddingGemma, 334 MB, under Google's Gemma terms
+scripts/fetch-models.sh gemma         # Gemma 4 E2B, 2.8 GB, Apache 2.0
+ccc embed                             # build this directory's vectors, about 25 chunks a second
+ccc ask "where do we check session tokens?"
+```
+
+`ccc ask` finds the closest code by meaning and has Gemma answer from it, naming what it looked at. Nothing leaves your machine. It took about 8 seconds on an M2 Pro, and it's a small model that can be wrong, so treat its answers as a starting point.
+
+To give Claude the same abilities, add `ccc mcp` as an MCP server. It offers `search_code`, for finding code when you don't know its name, and `ask_local`.
+
+### Add context to prompts
+
+```sh
+ccc enhance "why is the ledger overstating cost?"   # see what would be added, for free
+ccc init --enhance                                  # add it to every prompt
+```
+
+This never rewrites your prompt. It adds up to three likely files as marked context, chosen the way that measured best: past sessions plus keywords, with vectors stepping in for a repository with no history, once `ccc embed` has run. It runs as a hook, so it needs no proxy. It spends tokens on every prompt, so test it with `ccc eval`, using a setup that holds a `.claude/settings.json` with the hook.
 
 ### Test a setup
 
@@ -153,10 +187,46 @@ From `ccc whatif` on 3,489 calls in 10 sessions, $673.88 at list prices. Two ses
 
 | Change, simulated | Effect on cost | Catch |
 |---|---|---|
-| Restart above 300K, restoring 50K | -36% at most | Ignores rework and any effect on the work. Not tested on real tasks |
+| Restart above 300K, restoring 50K | -36% at most | Ignores rework and any effect on the work. Not tested at this size |
 | Restart above 300K, restoring 100K | -31% at most | The same |
 | Refresh the cache for up to 8 hours when idle | -3.0% at best | Needs something running throughout |
 | Refresh the cache for up to 48 hours when idle | +4.6% | Most refreshes are wasted |
+
+### Does restarting really save money?
+
+Real Claude Code worked through 12 tasks in one repository, either in one session or restarting every 4 tasks with `ccc handoff` (`scripts/restart_test.py`). A rule stated only in the first prompt checked whether the handoff kept what mattered.
+
+| Model | Runs per arm | One session | Restarting | Peak context | Modules passed | Rule followed |
+|---|---|---|---|---|---|---|
+| Haiku | 6 | $0.0304 | $0.0288, 5% less | 55K vs 34K | 12/12 in all | 12/12 in all |
+| Sonnet | 3 | $0.3672 | $0.4256, 16% more | 35K vs 28K | 12/12 in all | 12/12 in all |
+
+The handoff lost nothing here. But at these sizes restarting barely helps, and can cost more, because each restart rewrites its cache. The simulated savings above are for sessions past 300K tokens, which this test never reached, so they remain unproven. These tasks are also independent of each other, which flatters a restart.
+
+### Does adding context to prompts help?
+
+The same 12 tasks with and without `ccc init --enhance`, scored by `ccc eval`.
+
+| Model | Runs per setup | Cost | Turns | Result |
+|---|---|---|---|---|
+| Haiku | 72 | $0.0036 vs $0.0042, 14% less | 4.2 vs 4.7 | Better, p = 0.003 for cost and 0.017 for turns |
+| Sonnet | 24 | $0.0461 vs $0.0405, 14% more | 4.8 vs 3.1 | Worse, p = 0.0005 for cost and 0.001 for turns |
+
+Every run passed either way. The same feature helped one model and hurt the other, so it's off by default. The Haiku runs were extended after looking at a first batch, which makes its p-values somewhat optimistic. This is a tiny repository, and large ones may differ in either direction.
+
+Choosing the files, on 106 real prompts from 3 repositories (`ccc enrich-eval --embedding-model`), judged against what the work really touched. This uses today's code, so it flatters every row that reads it.
+
+| Source | Hit at 3 suggestions | Precision |
+|---|---|---|
+| Keywords | 20.8% | 11.7% |
+| EmbeddingGemma | 25.5% | 12.9% |
+| Keywords + embeddings | 28.3% | 14.8% |
+| Past sessions + keywords | 45.3% | 25.6% |
+| Past sessions + keywords + embeddings, ranks combined | 40.6% | 21.1% |
+| The same, then reordered by Gemma 4 E2B | 37.7% | 20.1% |
+| The same, then reordered by Qwen3-4B | 32.1% | 16.7% |
+
+Past sessions are the strongest signal. Embeddings beat keywords, so they help a repository with no history, but adding them to past sessions didn't help. Asking a model to reorder the files made things worse, though Gemma was faster than Qwen (0.64 s vs 1.19 s) and more accurate. So no model chooses files.
 
 ### Can `ccc eval` tell setups apart?
 
@@ -189,7 +259,9 @@ A warning from replay: under default limits, 5 of 23 trimmed results in final re
 
 | Step | Measured | Target |
 |---|---|---|
-| Whole default pipeline, 1 / 4 / 16 MB request, added p95 | 2 / 11 / 59 ms | 150 ms |
+| Whole default pipeline, 1 / 4 / 16 MB request, added p95 | 2 / 11 / 46 ms | 150 ms |
+| EmbeddingGemma on one prompt | about 30-45 ms | none set |
+| Gemma 4 E2B reordering files | about 640 ms | none set |
 | Qwen3-4B labels | about 160 ms, 20/22 intents right | 80 ms |
 | Qwen3-0.6B labels | about 100 ms, 5/22 intents right | 80 ms |
 | Qwen3-4B choosing lines in about 4K tokens of output | about 14 s | 600 ms |

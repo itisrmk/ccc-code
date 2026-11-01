@@ -52,7 +52,9 @@ These come from the same replay, using recorded token counts.
 | Refresh the cache through idle gaps for up to 8 hours | -3.0% at best | Needs something running the whole time |
 | The same, for up to 48 hours | +4.6% | Most refreshes are wasted |
 
-The restart figures are the first numbers near the original 30% target, but they're upper limits. A replay can't tell whether a fresh session would have done the work as well, or how much it would have had to re-learn. That needs a controlled test on real tasks, which hasn't been done.
+The restart figures are the first numbers near the original 30% target, but they're upper limits. A replay can't tell whether a fresh session would have done the work as well, or how much it would have had to re-learn.
+
+So we tested it on a small scale: real Claude Code on 12 tasks, in one session or restarting every 4 tasks with a generated handoff. Nothing was lost, with every module passing and a rule from the first prompt still followed. But it barely saved anything: 5% less on Haiku, and 16% *more* on Sonnet, because each restart rewrites its cache. Those sessions peaked at 55K tokens, nowhere near 300K. So restarting doesn't pay in small sessions, and whether it pays in large ones is still untested.
 
 Keeping the cache warm is the idea we most expected to win. Refreshing is 40 times cheaper than rewriting, but people are away for a long time, and a session you never return to pays for every refresh.
 
@@ -61,6 +63,8 @@ Keeping the cache warm is the idea we most expected to win. Refreshing is 40 tim
 **Measure before building.** The replay would have shown most of this before any pruning rule existed. It's the most useful thing we made.
 
 **Test live as well as offline.** Replay passed while a real task was failing. A pruning rule had dropped the only failure line, and only a live run found it. A cost ledger that replay never exercised also overstated cost by 56% until a live run caught it.
+
+**Check what you're summing.** `claude -p` reports a running total when resuming. Adding those up made restarting look 60% cheaper in a pilot, when the real difference was 5%.
 
 ## Run it on your own sessions
 

@@ -31,6 +31,15 @@ pub struct IndexError {
     source: std::io::Error,
 }
 
+impl IndexError {
+    pub(crate) fn new(path: &Path, source: std::io::Error) -> Self {
+        Self {
+            path: path.to_owned(),
+            source,
+        }
+    }
+}
+
 /// What the index knows about one file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileEntry {

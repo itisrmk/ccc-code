@@ -51,8 +51,8 @@ fn expiry_message(state: &SessionState, idle_millis: i64) -> Option<String> {
     };
     Some(format!(
         "ccc: this session's prompt cache expired {idle} ago. The next message rewrites {} \
-         tokens: about ${:.2} at list prices, against ${:.2} with a live cache. /compact or a \
-         fresh session with a short handoff would make that rewrite smaller.",
+         tokens: about ${:.2} at list prices, against ${:.2} with a live cache. /compact, or \
+         `ccc handoff --start` for a fresh session, would make that rewrite smaller.",
         tokens(state.context_tokens),
         state.rewrite_usd()?,
         state.read_usd()?,
@@ -62,7 +62,8 @@ fn expiry_message(state: &SessionState, idle_millis: i64) -> Option<String> {
 fn large_message(state: &SessionState, band: u64) -> Option<String> {
     Some(format!(
         "ccc: context has passed {} tokens. Each call now pays about ${:.2} at list prices to \
-         read it. `ccc whatif` shows what restarting at this size would have saved past sessions.",
+         read it. `ccc handoff --start` continues in a fresh session, and `ccc whatif` shows what \
+         that would have saved in the past.",
         tokens(band),
         state.read_usd()?,
     ))

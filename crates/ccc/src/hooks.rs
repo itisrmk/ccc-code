@@ -25,6 +25,12 @@ const REMINDER_FILES: usize = 5;
 /// How long Claude Code should wait for a hook, in seconds. They're meant to be quick.
 const HOOK_TIMEOUT_SECONDS: u32 = 10;
 
+/// Advice as `ccc init` sets it up.
+const DEFAULT_ADVICE: AdviseOptions = AdviseOptions {
+    min_context: 100_000,
+    block: false,
+};
+
 /// The settings that register every hook, for `claude --settings`.
 pub(crate) fn settings_json(ccc: &Path, state_dir: &Path, advice: Option<AdviseOptions>) -> Value {
     let advice_flags = advice.map_or_else(String::new, |options| {
@@ -59,7 +65,7 @@ pub(crate) fn settings_json(ccc: &Path, state_dir: &Path, advice: Option<AdviseO
     json!({ "hooks": hooks })
 }
 
-fn shell_quote(text: &str) -> String {
+pub(crate) fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
@@ -75,6 +81,34 @@ pub(crate) fn handle(
         .context("reading hook input")?;
     let input: Value = serde_json::from_str(&raw).context("parsing hook input")?;
     let field = |name: &str| input.get(name).and_then(Value::as_str).unwrap_or_default();
+
+    // These only warn, so `ccc init` adds nothing else to every session.
+    if matches!(event, "advise-session-start" | "advise-prompt") {
+        let options = advice.unwrap_or(DEFAULT_ADVICE);
+        let moment = match event {
+            "advise-prompt" => Moment::Prompt,
+            _ if field("source") == "resume" => Moment::Resume,
+            _ => return Ok(()),
+        };
+        let output = advise(
+            state_dir,
+            field("session_id"),
+            field("transcript_path"),
+            moment,
+            options,
+        )?;
+        if let Some(output) = output {
+            writeln!(std::io::stdout(), "{output}").context("writing advice")?;
+        }
+        return Ok(());
+    }
+
+    if event == "enhance-prompt" {
+        if let Some(context) = crate::enhance::hook(state_dir, field("cwd"), field("prompt")) {
+            writeln!(std::io::stdout(), "{context}").context("writing context")?;
+        }
+        return Ok(());
+    }
 
     log_event(state_dir, event, field("session_id"), &input)?;
     let give_advice = |moment| match advice {
