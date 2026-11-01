@@ -7,6 +7,6 @@ mod price;
 mod store;
 mod usage;
 
-pub use price::cost_usd;
+pub use price::{Rates, cost_usd, rates};
 pub use store::{Ledger, OpenLedgerError, SessionTotal};
 pub use usage::Usage;

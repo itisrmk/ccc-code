@@ -1,8 +1,10 @@
 //! `ccc`: a local-first prompt compiler for Claude Code.
 
+mod advise;
 mod bench;
 mod clients;
 mod dashboard;
+mod eval;
 mod export;
 mod hooks;
 mod learn;
@@ -15,6 +17,8 @@ mod names;
 mod policy;
 mod router;
 mod run;
+mod verify;
+mod whatif;
 
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
@@ -66,6 +70,14 @@ enum Command {
     Serve(ServeArgs),
     /// Replay local transcripts and report token and cost effects. Nothing leaves the machine.
     Bench(BenchArgs),
+    /// Show where sessions' money went, and what restarting or refreshing would change.
+    /// Reads local transcripts; nothing leaves the machine.
+    Whatif(WhatifArgs),
+    /// Test whether a Claude Code setup really helps, on tasks from a repository's own history.
+    Eval(eval::EvalArgs),
+    /// Check whether a gateway is safe to put between Claude Code and the API. Needs no API
+    /// key: the gateway forwards to a recording stand-in, and nothing leaves the machine.
+    Verify(verify::VerifyArgs),
     /// Show what recent sessions cost at list prices.
     Stats(StatsArgs),
     /// Learn which files past work needed, from local transcripts. Nothing leaves the machine.
@@ -75,7 +87,7 @@ enum Command {
     /// Judge file suggestions against what past work really touched.
     EnrichEval(EnrichEvalArgs),
     /// Print the settings that register ccc's hooks, for `claude --settings`.
-    HookSettings(StateArgs),
+    HookSettings(HookSettingsArgs),
     /// Handle a Claude Code hook. Called by Claude Code, not by hand.
     Hook(HookArgs),
     /// Train the learned router from labelled requests, and report its held-out accuracy.
@@ -371,6 +383,17 @@ struct BenchArgs {
 }
 
 #[derive(Debug, Args)]
+struct WhatifArgs {
+    /// Directory of Claude Code transcripts, normally ~/.claude/projects.
+    #[arg(value_name = "DIR")]
+    transcripts: PathBuf,
+    /// Also write the results as numbers only, to read and share if you choose. Holds no
+    /// prompts, paths, output or session ids, and nothing is sent anywhere.
+    #[arg(long, value_name = "FILE")]
+    export: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 struct StateArgs {
     /// Where per-conversation state lives. Defaults to ~/.ccc.
     #[arg(long, value_name = "DIR")]
@@ -431,12 +454,46 @@ struct EnrichEvalArgs {
 }
 
 #[derive(Debug, Args)]
+struct AdviseArgs {
+    /// Warn when a session's prompt cache has expired and when its context gets large. Warnings
+    /// are shown to you and never reach the model.
+    #[arg(long)]
+    advise: bool,
+    /// Stay quiet below this context size.
+    #[arg(long, value_name = "TOKENS", default_value_t = 100_000)]
+    advise_min_context: u64,
+    /// Hold back the first prompt after the cache expires, so you can choose before paying.
+    /// Sending it again goes ahead.
+    #[arg(long, requires = "advise")]
+    advise_block: bool,
+}
+
+impl AdviseArgs {
+    fn options(&self) -> Option<advise::AdviseOptions> {
+        self.advise.then_some(advise::AdviseOptions {
+            min_context: self.advise_min_context,
+            block: self.advise_block,
+        })
+    }
+}
+
+#[derive(Debug, Args)]
+struct HookSettingsArgs {
+    #[command(flatten)]
+    state: StateArgs,
+    #[command(flatten)]
+    advice: AdviseArgs,
+}
+
+#[derive(Debug, Args)]
 struct HookArgs {
-    /// Which event fired: session-start, pre-compact or stop.
+    /// Which event fired: session-start, user-prompt-submit, pre-compact or stop.
     #[arg(value_name = "EVENT")]
     event: String,
     #[command(flatten)]
     state: StateArgs,
+    #[command(flatten)]
+    advice: AdviseArgs,
 }
 
 #[cfg(feature = "ner")]
@@ -523,12 +580,12 @@ async fn main() -> anyhow::Result<ExitCode> {
         }
         Command::HookSettings(args) => {
             let ccc = std::env::current_exe().context("finding this program")?;
-            let settings = hooks::settings_json(&ccc, &args.dir()?);
+            let settings = hooks::settings_json(&ccc, &args.state.dir()?, args.advice.options());
             writeln!(std::io::stdout(), "{settings}")?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Hook(args) => {
-            hooks::handle(&args.event, &args.state.dir()?)?;
+            hooks::handle(&args.event, &args.state.dir()?, args.advice.options())?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Stats(args) => {
@@ -537,6 +594,15 @@ async fn main() -> anyhow::Result<ExitCode> {
         }
         Command::Bench(args) => {
             bench::run(&args.transcripts, args.export.as_deref())?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Eval(args) => {
+            eval::command(&args)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Verify(args) => verify::run(&args).await,
+        Command::Whatif(args) => {
+            whatif::run(&args.transcripts, args.export.as_deref())?;
             Ok(ExitCode::SUCCESS)
         }
     }

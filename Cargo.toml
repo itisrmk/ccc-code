@@ -12,6 +12,7 @@ license = "MIT"
 [workspace.dependencies]
 ccc-bench = { path = "crates/ccc-bench" }
 ccc-enrich = { path = "crates/ccc-enrich" }
+ccc-eval = { path = "crates/ccc-eval" }
 ccc-index = { path = "crates/ccc-index" }
 ccc-learn = { path = "crates/ccc-learn" }
 ccc-ledger = { path = "crates/ccc-ledger" }
@@ -22,6 +23,7 @@ ccc-prune = { path = "crates/ccc-prune" }
 ccc-redact = { path = "crates/ccc-redact" }
 ccc-route = { path = "crates/ccc-route" }
 ccc-slm = { path = "crates/ccc-slm" }
+ccc-verify = { path = "crates/ccc-verify" }
 ccc-wire = { path = "crates/ccc-wire" }
 
 anyhow = "1"

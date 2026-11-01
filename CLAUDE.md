@@ -19,9 +19,12 @@ Run these after every change. Add a line to the log below for each phase or real
 |---|---|---|
 | `scripts/check.sh` | Format, clippy with warnings as errors, all tests, docs, proxy overhead | Free, offline |
 | `target/release/ccc bench ~/.claude/projects` | Replays real transcripts: token and cost effect per scenario, append-only violations, fidelity, stage latency | Free, offline |
+| `target/release/ccc whatif ~/.claude/projects` | Spending breakdown from recorded usage, restart and keep-warm simulations | Free, offline |
 | `scripts/live_test.py` | Real Claude Code through `ccc` under strict thinking enforcement | About $0.02 on Haiku |
 
 Build first with `cargo build --release -p ccc --features local-model,ner`, so the model scenarios can run. They skip themselves without the feature or the weights in `~/.ccc/models`, fetched with `scripts/fetch-models.sh`. `ccc model-bench FILE --transcripts DIR` measures a model on this machine. `CCC_LIVE_MODEL=claude-opus-5-5` runs the live tests on another model; it costs about $0.20 per scenario for the first cache write.
+
+`ccc eval` tests Claude Code setups. `scripts/eval_fixture.py DIR` builds a task repository from this project's own synthetic bugs, so no outside code runs: `ccc eval mine DIR --test "python3 run_tests.py" --out tasks.json`, then `ccc eval run`. About $0.005 per run on Haiku.
 
 `scripts/e2e.py` measures task success (Gate 3): real Claude Code fixing small synthetic bugs with and without `ccc`, scored by running the tests afterward. About $0.02 per run on Haiku and $0.15 on Sonnet. `--check-tasks` confirms each task starts out failing, free.
 
@@ -42,10 +45,27 @@ Live scenarios (`scripts/live_test.py --list`):
 - `local_model`: real weights on the request path, with kept lines verbatim and history valid
 - `slow_model_floor`: a model too slow for its cap turns its stage off
 - `interactive`: the full-screen TUI in a real terminal via tmux
+- `advise`: resuming after the cache expired warns the person and the warning never reaches the model
+- `advise_block`: blocking holds back the first prompt after expiry, and sending it again works
+- `verify`: `ccc verify` passes `ccc`'s own proxy, free
+- `gateway_chain`: Claude Code through a gateway to an enforcing `ccc` to the real API
+- `eval`: `ccc eval` mines a commit and scores a real agent by running the tests
 
 ## Log
 
 Newest first. Record what was tested, what happened and any real finding. Numbers come from commands run, never estimates.
+
+### 2026-11-01
+
+- Final run on this work: `scripts/check.sh` passed with 302 tests, and 19 of 20 live scenarios passed with the 20th, Codex, skipped because it spends ChatGPT quota and no proxy code changed. Full pipeline 2, 11 and 59 ms at 1, 4 and 16 MB.
+- Added `ccc eval`. On 12 synthetic tasks, 3 repetitions, Haiku, 180 runs, $0.90: an identical copy showed no false alarm. A wasteful `CLAUDE.md` was caught on cost (2.2 times) and turns (27.6 vs 4.5), p = 0.0005. A read-only one was caught on pass rate (0% vs 100%), p = 0.0005. "Never run tests" wasn't caught (94.4% vs 100%), because Haiku solves these tasks without testing. Large effects only; small ones on real work are unproven.
+- `ccc eval` called "never run tests" BETTER on cost, because giving up early is cheap. The report now warns when lower cost comes with fewer passes.
+- A first `ccc eval` run on real `more-itertools` history left 63 folders in `~/.claude/projects`: Claude Code makes one per working directory even with `--no-session-persistence`. Removed them, and `ccc eval` now removes its own. Its results were lost with the temporary directory when the session ended, and the rerun was refused by the permission classifier because it executes downloaded code. So nothing here is measured on a real repository's history. Keep experiment output somewhere durable.
+- Added `ccc whatif`: reads usage only, and reproduces recorded cost exactly with no change. On 3,489 calls, $673.88: over 300K tokens of context is 76% of spending, idle cache rewrites 18%, tool output about 12%. Restarting above 300K while restoring 50K is -36% at most, unproven on real work. Keep-warm nets -3.0% at best and costs more at 48 hours, against an expectation that it would win.
+- Added `--advise`: warnings go out as `systemMessage`, since plain stdout from these hooks joins the model's context. Live tests age a throwaway transcript instead of waiting for a cache to expire.
+- Added `ccc verify`: 22 checks against a recording stand-in, proven by 13 deliberately broken gateways that each fail or warn on the right check. `ccc` passes. No real third-party gateway tested.
+- Correction: an earlier search suggested nothing measures whether a `CLAUDE.md` helps. `mdarena` (HudsonGri/mdarena, 68 stars) and the "Evaluating AGENTS.md" paper (arXiv 2602.11988) do. `ccc eval` isn't unique.
+- Bench refreshed after cleanup: 18 sessions, 2,496 calls, cache writes now within target at 9.3%.
 
 ### 2026-10-30
 

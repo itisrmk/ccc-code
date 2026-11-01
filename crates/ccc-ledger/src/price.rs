@@ -37,18 +37,45 @@ fn prices(model: &str, context_tokens: u64) -> Option<Prices> {
     })
 }
 
+/// What one token costs on a model, in dollars.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rates {
+    /// An input token that wasn't cached.
+    pub input: f64,
+    /// An input token read from the cache.
+    pub cache_read: f64,
+    /// An input token written to the cache with a 5-minute lifetime.
+    pub cache_write_5m: f64,
+    /// An input token written to the cache with a 1-hour lifetime.
+    pub cache_write_1h: f64,
+    /// A generated token.
+    pub output: f64,
+}
+
+/// Per-token rates for `model` at a given context size, or `None` if it has no known price.
+#[must_use]
+pub fn rates(model: &str, context_tokens: u64) -> Option<Rates> {
+    let price = prices(model, context_tokens)?;
+    let per_token = |dollars_per_million: f64| dollars_per_million / 1_000_000.0;
+    Some(Rates {
+        input: per_token(price.input),
+        cache_read: per_token(price.cache_read),
+        cache_write_5m: per_token(price.input * WRITE_5M_MULTIPLE),
+        cache_write_1h: per_token(price.input * WRITE_1H_MULTIPLE),
+        output: per_token(price.output),
+    })
+}
+
 /// The dollar cost of `usage` on `model`, or `None` if the model has no known price.
 #[must_use]
 pub fn cost_usd(model: &str, usage: &Usage) -> Option<f64> {
-    let price = prices(model, usage.context())?;
-    let per_token =
-        |tokens: u64, dollars_per_million: f64| tokens as f64 * dollars_per_million / 1_000_000.0;
+    let rates = rates(model, usage.context())?;
     Some(
-        per_token(usage.input, price.input)
-            + per_token(usage.cache_read, price.cache_read)
-            + per_token(usage.cache_write_5m, price.input * WRITE_5M_MULTIPLE)
-            + per_token(usage.cache_write_1h, price.input * WRITE_1H_MULTIPLE)
-            + per_token(usage.output, price.output),
+        usage.input as f64 * rates.input
+            + usage.cache_read as f64 * rates.cache_read
+            + usage.cache_write_5m as f64 * rates.cache_write_5m
+            + usage.cache_write_1h as f64 * rates.cache_write_1h
+            + usage.output as f64 * rates.output,
     )
 }
 

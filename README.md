@@ -1,8 +1,16 @@
 # ccc
 
-A local proxy between Claude Code and the Anthropic API. It redacts secrets before they leave your machine, trims noisy tool output, records what each session costs, and can add file hints or route calls between models.
+Tools for working out what Claude Code really costs and whether your setup really helps.
 
-**It doesn't deliver the large token savings it was designed for.** On the author's sessions, trimming cuts context by about 0.6% and cost by about 0.4%. Its measurable value today is redaction and cost visibility. The [results](#results) explain why, and `ccc bench` measures your own sessions.
+- **`ccc whatif`** shows where your sessions' money went and what restarting or refreshing them would have changed.
+- **`ccc eval`** tests a `CLAUDE.md`, skill or hook on tasks from a repository's history, scored by running the tests.
+- **`--advise`** warns you when a session's cache has expired or its context has grown large, before you pay for it.
+- **`ccc verify`** checks whether a gateway is safe to put in front of Claude Code.
+- **`ccc run`** is a local proxy that redacts secrets, trims noisy tool output and records costs.
+
+None of these except `ccc run` sits between you and the API, unless you point `ccc verify` at a proxy.
+
+**The proxy doesn't deliver the large token savings it was designed for.** On the author's sessions, trimming cuts context by about 0.6% and cost by about 0.4%. The [results](#results) explain why, and [the write-up](docs/token-savings-writeup.md) goes further. `ccc bench` and `ccc whatif` measure your own sessions.
 
 ## Read this before using a subscription login
 
@@ -32,7 +40,47 @@ ccc run --stats --budget-usd 5 -- claude
 ccc stats                               # what recent sessions cost
 ccc dashboard                           # the same, as a page on localhost
 ccc bench ~/.claude/projects            # measure effects on your own sessions, offline
+ccc whatif ~/.claude/projects           # where the money went, and what would change it
 ```
+
+### See where the money went
+
+`ccc whatif` replays recorded token counts, so it needs no model and sends nothing anywhere. It breaks spending down by type and context size, then simulates restarting long sessions and keeping caches warm. With no change, the simulation reproduces recorded usage exactly. A restart's figure is an upper limit, because a replay can't see rework or whether the work would have gone as well. `--export FILE` writes totals only, to [share if you choose](docs/share-your-numbers.md).
+
+### Get warned before you pay
+
+```sh
+ccc hook-settings --advise > ccc-hooks.json
+claude --settings ccc-hooks.json
+```
+
+This warns you once when you resume a session whose cache has expired, with the price of the rewrite, and once each as context passes 300K and 600K tokens. Warnings are shown to you and never reach the model. Add `--advise-block` to hold back the first prompt after an expiry, so you can `/compact` first. Sending it again goes ahead. It stays quiet below 100K tokens, which `--advise-min-context` changes.
+
+### Test a setup
+
+```sh
+ccc eval mine ./my-repo --test "pytest -q" --out tasks.json    # free, but runs your tests
+ccc eval run tasks.json --setup plain --setup mine=./my-setup \
+    --out results.jsonl --max-usd 5                            # spends Claude quota
+ccc eval report results.jsonl                                  # free
+```
+
+A task is a real commit with its source change undone and its tests kept. `mine` keeps only commits whose tests fail without the change and pass with it. A setup is a directory of files placed over the repository, such as a `CLAUDE.md`. The first setup is the baseline.
+
+Each run gets a new git history, so it can't read the answer from later commits, and test files go back before scoring, so editing them doesn't help. Only project settings apply, so your own `CLAUDE.md`, hooks and MCP servers can't affect a run. `--max-usd` stops new runs at a spending limit, and running again continues where it stopped.
+
+Each task counts once however often it runs, and you need at least 7 for a difference to count at all. Agents run with Bash allowed, in a temporary directory but not a sandbox, so only use repositories you trust.
+
+### Check a gateway
+
+```sh
+ccc verify --gateway http://127.0.0.1:4000 --spawn "my-gateway --upstream {upstream} --port 4000"
+ccc verify --gateway http://127.0.0.1:4000 --upstream-port 9999   # one already running
+```
+
+Your gateway forwards to a recording stand-in for the API, so this needs no API key and sends nothing anywhere. It checks that thinking blocks and signatures survive, that history never changes on later turns, that `system` and `tools` stay stable, that repeated requests forward the same bytes, and that streaming, errors and large requests come through. The exit status is non-zero if anything fails.
+
+The stand-in compares bytes and doesn't validate signatures. For the real server's verdict, chain your gateway to `ccc serve --enforce-thinking-check` and run Claude Code through it.
 
 State lives in `~/.ccc`: a redaction key, per-conversation settings, the cost ledger, and anything the optional features save.
 
@@ -69,7 +117,7 @@ redact_rules = ["Project Bluebird"]
 
 ## Results
 
-Measured on one person's work on an M2 Pro with 16 GB. That's 16 replayed sessions and 2,435 API calls, two of them dominating, in a mode that favours Bash. Yours may differ, so run `ccc bench`.
+Measured on one person's work on an M2 Pro with 16 GB. That's 18 replayed sessions and 2,496 API calls, two of them dominating, in a mode that favours Bash. Yours may differ, so run `ccc bench`.
 
 ### Tokens and cost
 
@@ -77,7 +125,7 @@ Measured on one person's work on an M2 Pro with 16 GB. That's 16 replayed sessio
 |---|---|---|---|
 | Prune, default limits | -2.6% | -0.6% | -0.4% |
 | Prune, tighter limits | -6.1% | -1.4% | -1.1% |
-| Server-side clearing, simulated, not shipped | -46.4% | -11.3% | -3.9% |
+| Server-side clearing, simulated, not shipped | -46.2% | -11.1% | -3.9% |
 
 The original goal was 30%. It isn't reachable this way on these sessions, for these reasons:
 
@@ -88,7 +136,40 @@ The original goal was 30%. It isn't reachable this way on these sessions, for th
 
 The server-side clearing row is optimistic, because it ignores the extra calls a model would make to re-read what it lost. Anthropic's docs also warn that context editing is not a savings lever.
 
-The simulation behind these numbers matches recorded usage within 0.1% on context, 0.0% on cache reads and 3.8% on cost. Simulated cache writes are 10.4% high, just over the 10% target.
+The simulation behind these numbers matches recorded usage within 0.1% on context, 0.0% on cache reads, 9.3% on cache writes and 3.6% on cost.
+
+### Where the money goes
+
+From `ccc whatif` on 3,489 calls in 10 sessions, $673.88 at list prices. Two sessions make up 89% of it.
+
+| Where it went | Share of spending |
+|---|---|
+| Cache reads | 56% |
+| Cache writes | 29% |
+| Output | 14% |
+| Calls with over 300K tokens of context (overlaps) | 76% |
+| Rewriting the cache after an idle gap, 26 times (overlaps) | 18% |
+| Tool output, estimated (overlaps) | 12% |
+
+| Change, simulated | Effect on cost | Catch |
+|---|---|---|
+| Restart above 300K, restoring 50K | -36% at most | Ignores rework and any effect on the work. Not tested on real tasks |
+| Restart above 300K, restoring 100K | -31% at most | The same |
+| Refresh the cache for up to 8 hours when idle | -3.0% at best | Needs something running throughout |
+| Refresh the cache for up to 48 hours when idle | +4.6% | Most refreshes are wasted |
+
+### Can `ccc eval` tell setups apart?
+
+Tested on 12 tasks in a synthetic repository (`scripts/eval_fixture.py`), 3 repetitions each on Haiku, 180 runs for $0.90. [The results](docs/results/eval-synthetic-haiku.jsonl) and [setups](docs/results/eval-setups) are in the repo.
+
+| Setup against plain | Pass rate | Cost | Turns | Result |
+|---|---|---|---|---|
+| The same setup again, as a control | 100% vs 100% | +3% | 4.6 vs 4.5 | No false alarm |
+| Told to read everything and re-run everything | 100% vs 100% | 2.2 times as much | 27.6 vs 4.5 | Caught, p = 0.0005 |
+| Told it can't edit files | 0% vs 100% | -6% | 5.7 vs 4.5 | Caught, p = 0.0005 |
+| Told never to run tests | 94.4% vs 100% | -17% | 4.1 vs 4.5 | Lower pass rate not detected |
+
+It catches large effects. It missed the last one because these tasks are too easy: Haiku passed 34 of 36 without being allowed to test. Small effects on hard, real work are unproven, because this hasn't run on a real repository's history to completion. A run that gives up early is cheap, so the report warns when lower cost comes with fewer passes.
 
 ### Does it hurt task success?
 
@@ -108,7 +189,7 @@ A warning from replay: under default limits, 5 of 23 trimmed results in final re
 
 | Step | Measured | Target |
 |---|---|---|
-| Whole default pipeline, 1 / 4 / 16 MB request, added p95 | 2 / 11 / 47 ms | 150 ms |
+| Whole default pipeline, 1 / 4 / 16 MB request, added p95 | 2 / 11 / 59 ms | 150 ms |
 | Qwen3-4B labels | about 160 ms, 20/22 intents right | 80 ms |
 | Qwen3-0.6B labels | about 100 ms, 5/22 intents right | 80 ms |
 | Qwen3-4B choosing lines in about 4K tokens of output | about 14 s | 600 ms |
@@ -127,6 +208,7 @@ This is why the model-based features are off by default. The prune model also tu
 - **Dollar figures are list prices** from Claude Code's bundled docs, dated 2026-10-06, and notional on a subscription.
 - **`~/.ccc` isn't cleaned up.** Its small per-conversation files accumulate.
 - **Ollama is untested.** `--local-url` was only tested against a fake server.
+- **`ccc verify` hasn't met a real third-party gateway.** It's been run on `ccc` itself and on 13 deliberately broken test gateways.
 
 ## Testing
 

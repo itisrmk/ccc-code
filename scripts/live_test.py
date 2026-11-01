@@ -17,12 +17,14 @@ import random
 import re
 import shlex
 import shutil
+import socket
 import string
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -625,6 +627,224 @@ def scenario_interactive(box):
         )
     fired = {rule for exchange in exchanges for rule in exchange["rules"]}
     return f"TUI answered through ccc, {len(exchanges)} requests accepted, rules {sorted(fired)}"
+
+
+def advice_settings(box, *flags):
+    settings = subprocess.run(
+        [str(CCC), "hook-settings", "--state-dir", str(box.state), "--advise",
+         "--advise-min-context", "1000", *flags],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    return json.loads(settings)
+
+
+def age_transcript(box, session_id, hours=3):
+    """Moves a throwaway session's records into the past, so its cache looks expired without
+    waiting an hour. Nothing else about the session changes."""
+    marker = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(box.work))
+    path = Path.home() / ".claude" / "projects" / marker / f"{session_id}.jsonl"
+    check(path.exists(), f"no transcript at {path}")
+    aged = datetime.now(timezone.utc) - timedelta(hours=hours)
+    stamp = aged.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    text = re.sub(r'"timestamp":"[^"]+"', f'"timestamp":"{stamp}"', path.read_text())
+    path.write_text(text)
+
+
+def scenario_advise(box):
+    """Resuming after the cache expired warns the person, and the model never sees the warning."""
+    settings_file = box.base / "settings.json"
+    settings_file.write_text(json.dumps(advice_settings(box)))
+    first = run_headless(box, "Reply with only the word done.", "--settings", str(settings_file))
+    check(not first["is_error"], f"task errored: {first.get('result')}")
+    age_transcript(box, first["session_id"])
+    before = len(box.exchanges())
+    command = ccc_args(box) + [
+        "claude", "-p", "Reply with only the word ok.", "--model", MODEL,
+        "--resume", first["session_id"], "--settings", str(settings_file),
+        "--output-format", "stream-json", "--verbose",
+    ]
+    done = subprocess.run(
+        command, cwd=box.work, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300
+    )
+    check(done.returncode == 0, f"exit {done.returncode}: {done.stderr[-400:]}")
+    check("prompt cache expired" in done.stdout, f"no warning shown: {done.stdout[-800:]}")
+    later = box.exchanges()[before:]
+    assert_all_accepted(later, require_thinking=False)
+    for exchange in later:
+        check(
+            b"prompt cache expired" not in exchange["sent_bytes"],
+            "the warning reached the model",
+        )
+    return "the warning was shown on resume, stayed out of the request, and history stayed valid"
+
+
+def scenario_advise_block(box):
+    """Blocking holds back the first prompt after the cache expired, and sending it again works."""
+    settings = advice_settings(box, "--advise-block")
+    # Leaves only the prompt hook, which is what an idle open session goes through.
+    settings["hooks"] = {"UserPromptSubmit": settings["hooks"]["UserPromptSubmit"]}
+    settings_file = box.base / "settings.json"
+    settings_file.write_text(json.dumps({"hooks": {}}))
+    first = run_headless(box, "Reply with only the word done.", "--settings", str(settings_file))
+    age_transcript(box, first["session_id"])
+    settings_file.write_text(json.dumps(settings))
+    before = len(box.exchanges())
+
+    def resume():
+        return subprocess.run(
+            ccc_args(box) + [
+                "claude", "-p", "Reply with only the word ok.", "--model", MODEL,
+                "--resume", first["session_id"], "--settings", str(settings_file),
+                "--output-format", "stream-json", "--verbose",
+            ],
+            cwd=box.work, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300,
+        )
+
+    held = resume()
+    check("prompt cache expired" in held.stdout + held.stderr, f"no warning: {held.stdout[-800:]}")
+    sent_while_held = [
+        exchange for exchange in box.exchanges()[before:] if not is_quota_probe(exchange)
+        and b"Reply with only the word ok." in exchange["sent_bytes"]
+    ]
+    check(not sent_while_held, "the blocked prompt was sent anyway")
+    # Each Claude Code run ages nothing: the transcript's last call is still the old one.
+    allowed = resume()
+    check(allowed.returncode == 0, f"exit {allowed.returncode}: {allowed.stderr[-400:]}")
+    sent = [
+        exchange for exchange in box.exchanges()[before:]
+        if b"Reply with only the word ok." in exchange["sent_bytes"]
+    ]
+    check(sent, "sending the prompt again didn't go through")
+    assert_all_accepted(sent, require_thinking=False)
+    return "the first prompt was held back with the price, and the second went through"
+
+
+def free_port():
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def wait_for_port(port, deadline_seconds=20):
+    deadline = time.time() + deadline_seconds
+    while time.time() < deadline:
+        with socket.socket() as probe:
+            probe.settimeout(0.25)
+            if probe.connect_ex(("127.0.0.1", port)) == 0:
+                return
+        time.sleep(0.1)
+    raise Failed(f"nothing listening on port {port}")
+
+
+def scenario_verify(box):
+    """`ccc verify` passes ccc's own proxy with its default stages, for free."""
+    port = free_port()
+    spawn = (
+        f"{shlex.quote(str(CCC))} serve --upstream {{upstream}} --listen 127.0.0.1:{port} "
+        f"--state-dir {shlex.quote(str(box.state))}"
+    )
+    done = subprocess.run(
+        [str(CCC), "verify", "--gateway", f"http://127.0.0.1:{port}", "--spawn", spawn, "--json"],
+        cwd=box.work, capture_output=True, text=True, timeout=120,
+    )
+    check(done.returncode == 0, f"exit {done.returncode}: {done.stdout[-800:]} {done.stderr[-300:]}")
+    report = json.loads(done.stdout)
+    check(report["passed"], f"verify failed: {report}")
+    return f"{len(report['checks'])} checks, none failed"
+
+
+def scenario_gateway_chain(box):
+    """The real server's verdict: Claude Code through a gateway to an enforcing ccc to the API.
+    This is how to get a real answer for any gateway that passes `ccc verify`."""
+    enforcing_port, gateway_port = free_port(), free_port()
+    enforcing_state, gateway_state = box.base / "enforcing", box.base / "gateway"
+    servers = [
+        subprocess.Popen(
+            [str(CCC), "serve", "--no-prune", "--no-redact", "--enforce-thinking-check",
+             "--listen", f"127.0.0.1:{enforcing_port}", "--state-dir", str(enforcing_state),
+             "--dump", str(box.dump), "--upstream", "https://api.anthropic.com"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ),
+        subprocess.Popen(
+            [str(CCC), "serve", "--listen", f"127.0.0.1:{gateway_port}",
+             "--state-dir", str(gateway_state), "--upstream", f"http://127.0.0.1:{enforcing_port}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ),
+    ]
+    try:
+        wait_for_port(enforcing_port)
+        wait_for_port(gateway_port)
+        environment = {**os.environ, "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{gateway_port}"}
+        box.write_test_script(800)
+
+        def claude(prompt, *extra):
+            done = subprocess.run(
+                ["claude", "-p", prompt, "--model", MODEL, "--allowedTools", "Bash",
+                 "--output-format", "json", *extra],
+                cwd=box.work, env=environment, stdin=subprocess.DEVNULL,
+                capture_output=True, text=True, timeout=300,
+            )
+            check(done.returncode == 0, f"exit {done.returncode}: {done.stderr[-400:]}")
+            return json.loads(done.stdout)
+
+        first = claude("Run 'make test' with Bash, then name the failing test in one line.")
+        check(not first["is_error"], f"task errored: {first.get('result')}")
+        second = claude("Say ok.", "--resume", first["session_id"])
+        check(not second["is_error"], f"resume errored: {second.get('result')}")
+    finally:
+        for server in servers:
+            server.terminate()
+            server.wait(timeout=10)
+    exchanges = box.exchanges()
+    assert_all_accepted(exchanges)
+    return f"{len(exchanges)} requests accepted by the real API under strict enforcement"
+
+
+def scenario_eval(box):
+    """`ccc eval` mines a real commit and scores a real agent by running the tests."""
+    repo = box.base / "repo"
+    repo.mkdir()
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+    subprocess.run(git + ["init", "-q", "."], cwd=repo, check=True)
+    (repo / "tests").mkdir()
+    (repo / "pager.py").write_text("def page_count(total, size):\n    return total // size\n")
+    (repo / "tests" / "check.py").write_text(
+        "import sys\nsys.path.insert(0, '.')\nfrom pager import page_count\n"
+        "assert page_count(4, 2) == 2\n"
+    )
+    subprocess.run(git + ["add", "-A"], cwd=repo, check=True)
+    subprocess.run(git + ["commit", "-qm", "Start"], cwd=repo, check=True)
+    (repo / "pager.py").write_text(
+        "def page_count(total, size):\n    return -(-total // size)\n"
+    )
+    with open(repo / "tests" / "check.py", "a") as test:
+        test.write("assert page_count(5, 2) == 3\n")
+    subprocess.run(git + ["add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        git + ["commit", "-qm", "Count a partial page as a page"], cwd=repo, check=True
+    )
+    tasks, results = box.base / "tasks.json", box.base / "results.jsonl"
+    mined = subprocess.run(
+        [str(CCC), "eval", "mine", str(repo), "--test", "python3 tests/check.py",
+         "--out", str(tasks)],
+        capture_output=True, text=True, timeout=120,
+    )
+    check(mined.returncode == 0, f"mining failed: {mined.stderr[-400:]}")
+    check(json.loads(tasks.read_text())["tasks"], f"no task found: {mined.stdout}")
+    empty = box.base / "empty"
+    empty.mkdir()
+    ran = subprocess.run(
+        [str(CCC), "eval", "run", str(tasks), "--setup", "a", "--setup", f"b={empty}",
+         "--out", str(results), "--max-usd", "1", "--reps", "1", "--model", MODEL],
+        capture_output=True, text=True, timeout=600,
+    )
+    check(ran.returncode == 0, f"run failed: {ran.stderr[-400:]}")
+    records = [json.loads(line) for line in results.read_text().splitlines()]
+    check(len(records) == 2, f"expected 2 runs: {ran.stdout}")
+    check(all(record["passed"] for record in records), f"a real fix wasn't scored: {records}")
+    check(all(record["cost_usd"] > 0 for record in records), f"no cost recorded: {records}")
+    check("too few tasks differ" in ran.stdout, f"one task should be too few: {ran.stdout}")
+    return f"{len(records)} real runs scored by the tests, ${sum(r['cost_usd'] for r in records):.3f}"
 
 
 def forget_transcripts(base):

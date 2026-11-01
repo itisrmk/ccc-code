@@ -266,6 +266,7 @@ dependencies = [
  "axum",
  "ccc-bench",
  "ccc-enrich",
+ "ccc-eval",
  "ccc-index",
  "ccc-learn",
  "ccc-ledger",
@@ -276,6 +277,7 @@ dependencies = [
  "ccc-redact",
  "ccc-route",
  "ccc-slm",
+ "ccc-verify",
  "ccc-wire",
  "clap",
  "serde_json",
@@ -308,6 +310,15 @@ dependencies = [
  "ccc-wire",
  "serde_json",
  "tracing",
+]
+
+[[package]]
+name = "ccc-eval"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -432,6 +443,23 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "ccc-verify"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bytes",
+ "ccc-pipeline",
+ "ccc-proxy",
+ "ccc-prune",
+ "ccc-redact",
+ "futures-util",
+ "reqwest",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

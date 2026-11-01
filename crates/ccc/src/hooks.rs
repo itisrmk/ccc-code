@@ -17,6 +17,7 @@ use ccc_ledger::Ledger;
 use serde_json::{Value, json};
 
 use crate::LEDGER_FILE;
+use crate::advise::{AdviseOptions, Moment, advise};
 use crate::learn::{index_cache_path, memory_path};
 
 /// Files to name when reminding a compacted session of its context.
@@ -25,10 +26,17 @@ const REMINDER_FILES: usize = 5;
 const HOOK_TIMEOUT_SECONDS: u32 = 10;
 
 /// The settings that register every hook, for `claude --settings`.
-pub(crate) fn settings_json(ccc: &Path, state_dir: &Path) -> Value {
+pub(crate) fn settings_json(ccc: &Path, state_dir: &Path, advice: Option<AdviseOptions>) -> Value {
+    let advice_flags = advice.map_or_else(String::new, |options| {
+        let block = if options.block { " --advise-block" } else { "" };
+        format!(
+            " --advise --advise-min-context {}{block}",
+            options.min_context
+        )
+    });
     let command = |event: &str| {
         format!(
-            "{} hook {event} --state-dir {}",
+            "{} hook {event} --state-dir {}{advice_flags}",
             shell_quote(&ccc.to_string_lossy()),
             shell_quote(&state_dir.to_string_lossy()),
         )
@@ -40,11 +48,15 @@ pub(crate) fn settings_json(ccc: &Path, state_dir: &Path) -> Value {
             "timeout": HOOK_TIMEOUT_SECONDS,
         }] }])
     };
-    json!({ "hooks": {
+    let mut hooks = json!({
         "SessionStart": entry("session-start"),
         "PreCompact": entry("pre-compact"),
         "Stop": entry("stop"),
-    } })
+    });
+    if advice.is_some() {
+        hooks["UserPromptSubmit"] = entry("user-prompt-submit");
+    }
+    json!({ "hooks": hooks })
 }
 
 fn shell_quote(text: &str) -> String {
@@ -52,7 +64,11 @@ fn shell_quote(text: &str) -> String {
 }
 
 /// Handles one hook event, reading its details from stdin.
-pub(crate) fn handle(event: &str, state_dir: &Path) -> anyhow::Result<()> {
+pub(crate) fn handle(
+    event: &str,
+    state_dir: &Path,
+    advice: Option<AdviseOptions>,
+) -> anyhow::Result<()> {
     let mut raw = String::new();
     std::io::stdin()
         .read_to_string(&mut raw)
@@ -61,8 +77,30 @@ pub(crate) fn handle(event: &str, state_dir: &Path) -> anyhow::Result<()> {
     let field = |name: &str| input.get(name).and_then(Value::as_str).unwrap_or_default();
 
     log_event(state_dir, event, field("session_id"), &input)?;
+    let give_advice = |moment| match advice {
+        Some(options) => {
+            let output = advise(
+                state_dir,
+                field("session_id"),
+                field("transcript_path"),
+                moment,
+                options,
+            )?;
+            if let Some(output) = output {
+                writeln!(std::io::stdout(), "{output}").context("writing advice")?;
+            }
+            Ok(())
+        }
+        None => Ok::<(), anyhow::Error>(()),
+    };
     match event {
-        "session-start" => session_start(state_dir, field("cwd"), field("source")),
+        "session-start" => {
+            if field("source") == "resume" {
+                give_advice(Moment::Resume)?;
+            }
+            session_start(state_dir, field("cwd"), field("source"))
+        }
+        "user-prompt-submit" => give_advice(Moment::Prompt),
         "stop" => stop(state_dir, field("session_id")),
         // Logged above; the docs offer no way to add compaction instructions from here.
         "pre-compact" => Ok(()),
@@ -139,7 +177,12 @@ mod tests {
 
     #[test]
     fn settings_register_every_hook_with_quoted_paths() {
-        let settings = settings_json(&PathBuf::from("/opt/my tools/ccc"), &PathBuf::from("/st"));
+        let settings = settings_json(
+            &PathBuf::from("/opt/my tools/ccc"),
+            &PathBuf::from("/st"),
+            None,
+        );
+        assert!(settings["hooks"].get("UserPromptSubmit").is_none());
         for (event, name) in [
             ("SessionStart", "session-start"),
             ("PreCompact", "pre-compact"),
@@ -153,6 +196,24 @@ mod tests {
                 "{command}"
             );
             assert!(command.contains(name), "{command}");
+        }
+    }
+
+    #[test]
+    fn advice_adds_the_prompt_hook_and_passes_its_options_along() {
+        let options = AdviseOptions {
+            min_context: 5000,
+            block: true,
+        };
+        let settings = settings_json(&PathBuf::from("/ccc"), &PathBuf::from("/st"), Some(options));
+        for event in ["UserPromptSubmit", "SessionStart"] {
+            let command = settings["hooks"][event][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap();
+            assert!(
+                command.ends_with("--advise --advise-min-context 5000 --advise-block"),
+                "{command}"
+            );
         }
     }
 
