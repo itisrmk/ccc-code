@@ -13,3 +13,11 @@ mod stage;
 
 pub use rules::Limits;
 pub use stage::Prune;
+
+use serde_json::Value;
+
+/// Shortens one tool's output, for callers outside the proxy. `None` means leave it whole.
+#[must_use]
+pub fn trim_output(tool: &str, input: Option<&Value>, text: &str) -> Option<String> {
+    rules::trim(&Limits::default(), tool, input, text).map(|trimmed| trimmed.text)
+}

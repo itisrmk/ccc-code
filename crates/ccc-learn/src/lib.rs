@@ -5,7 +5,12 @@
 //! Nothing leaves the machine.
 
 mod memory;
+mod rules;
 mod turns;
 
 pub use memory::{Memory, OpenMemoryError};
+pub use rules::{
+    Candidate, EVERYWHERE, Rule, RuleStatus, RuleStore, WorkingCommand, read_candidates,
+    read_working_commands, rules_text,
+};
 pub use turns::{Turn, read_turns};

@@ -20,13 +20,6 @@ const WEEK_DAYS: u64 = 7;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Basis {
     /// Output that was shortened before Claude saw it.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "recorded once trimming moves from the proxy to a hook"
-        )
-    )]
     Trimmed,
     /// Code a local model read, in place of Claude possibly reading it.
     LocalAnswer,

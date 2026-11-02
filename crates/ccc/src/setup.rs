@@ -16,7 +16,7 @@ use futures_util::StreamExt as _;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::config::{Backend, DEFAULT_ANSWERING, DEFAULT_EMBEDDING, LocalConfig};
+use crate::config::{Backend, DEFAULT_ANSWERING, DEFAULT_EMBEDDING, Jobs, LocalConfig};
 use crate::daemon::{DaemonClient, socket_path};
 use crate::hooks::shell_quote;
 use crate::{gain, init};
@@ -444,12 +444,15 @@ pub(crate) async fn setup(args: &SetupArgs, claude_home: &Path) -> anyhow::Resul
         .clone()
         .unwrap_or_else(|| claude_home.join("settings.json"));
 
+    // Running setup again mustn't quietly turn off what someone turned on.
+    let earlier_jobs = LocalConfig::load(&state_dir).map_or_else(|_| Jobs::default(), |c| c.jobs);
     let config = if let (Some(url), Some(embedding)) = (&args.server, &args.embedding_model) {
         say(&format!("Using the model server at {url}."));
         LocalConfig {
             backend: Backend::Server { url: url.clone() },
             embedding: embedding.clone(),
             answering: args.answer_model.clone(),
+            jobs: earlier_jobs,
         }
     } else {
         if let Some(models) = running_server_models(OLLAMA_URL).await {
@@ -482,6 +485,7 @@ pub(crate) async fn setup(args: &SetupArgs, claude_home: &Path) -> anyhow::Resul
             backend: Backend::Builtin,
             embedding: DEFAULT_EMBEDDING.to_owned(),
             answering,
+            jobs: earlier_jobs,
         }
     };
     // A service already running holds the old settings, so the next use starts a fresh one.

@@ -349,6 +349,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]

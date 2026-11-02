@@ -28,6 +28,8 @@ const ANSWER_DEADLINE: Duration = Duration::from_secs(90);
 /// A person is waiting on a hook, so vectors arrive quickly or not at all.
 const VECTOR_PATIENCE: Duration = Duration::from_millis(800);
 const CHARS_PER_TOKEN: usize = 4;
+/// About as much as fits in the model's context with room for its answer.
+const MAX_DIGEST_CHARS: usize = 40_000;
 const SEARCH_LIMIT: u64 = 5;
 const MAX_SEARCH_LIMIT: u64 = 20;
 /// The MCP version to offer a client that doesn't name one.
@@ -234,6 +236,8 @@ pub(crate) fn vector_files(
 trait Tools {
     fn search_code(&self, query: &str, limit: usize) -> anyhow::Result<String>;
     fn ask_local(&self, question: &str) -> anyhow::Result<String>;
+    fn summarize_file(&self, path: &str) -> anyhow::Result<String>;
+    fn explain_log(&self, log: &str) -> anyhow::Result<String>;
 }
 
 impl Tools for Models {
@@ -257,6 +261,54 @@ impl Tools for Models {
         record_local_answer(&self.state_dir, &self.root, &sources, &text);
         Ok(format!("{text}\n\nLooked at: {}", sources.join(", ")))
     }
+
+    fn summarize_file(&self, path: &str) -> anyhow::Result<String> {
+        let file = file_inside(&self.root, path)?;
+        let text = fs::read_to_string(&file).with_context(|| format!("reading {path}"))?;
+        self.digest(
+            "Summarize what this file does and name its main functions or types, in under 120 \
+             words. Only state what the file shows.",
+            &text,
+        )
+    }
+
+    fn explain_log(&self, log: &str) -> anyhow::Result<String> {
+        self.digest(
+            "Say what went wrong in this log and quote the lines that show it exactly, in under \
+             120 words. If nothing went wrong, say so.",
+            log,
+        )
+    }
+}
+
+impl Models {
+    /// Has the local model read `text` so Claude doesn't have to, and records the difference.
+    fn digest(&self, instruction: &str, text: &str) -> anyhow::Result<String> {
+        let shown: String = text.chars().take(MAX_DIGEST_CHARS).collect();
+        let completion = self
+            .client
+            .complete(&CompletionRequest {
+                prompt: &format!("{instruction}\n\n{shown}"),
+                grammar: None,
+                max_tokens: MAX_ANSWER_TOKENS,
+                deadline: ANSWER_DEADLINE,
+            })
+            .context("asking the local model")?;
+        let answer = completion.text.trim().to_owned();
+        let saved = shown.len().saturating_sub(answer.len()) / CHARS_PER_TOKEN;
+        gain::record(&self.state_dir, gain::Basis::LocalAnswer, saved as u64);
+        Ok(answer)
+    }
+}
+
+/// `path` as a file inside `root`. Anything that leads outside is refused, since a model can be
+/// talked into asking for anything.
+fn file_inside(root: &Path, path: &str) -> anyhow::Result<PathBuf> {
+    let found = fs::canonicalize(root.join(path)).with_context(|| format!("no file at {path}"))?;
+    if !found.starts_with(root) {
+        anyhow::bail!("{path} is outside this repository");
+    }
+    Ok(found)
 }
 
 /// Counts what the local model read in place of Claude. It's an estimate, since Claude might not
@@ -295,6 +347,27 @@ fn tool_list() -> Value {
             },
         },
         {
+            "name": "summarize_file",
+            "description": "Have a small local model summarize a large file, so you can decide \
+                whether to read it. Free and private, but it can be wrong: read the file before \
+                you change it or rely on the details.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "path": { "type": "string", "description": "Relative to the repository" } },
+                "required": ["path"],
+            },
+        },
+        {
+            "name": "explain_log",
+            "description": "Have a small local model pick out what went wrong in long log output. \
+                Free and private, but it can miss things, so check what it quotes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "log": { "type": "string" } },
+                "required": ["log"],
+            },
+        },
+        {
             "name": "ask_local",
             "description": "Ask a small local model a simple question about this repository. \
                 It's free and private but much weaker than you, and it can be wrong, so check \
@@ -329,6 +402,14 @@ fn call_tool(tools: &dyn Tools, params: &Value) -> Value {
         Some("ask_local") => match text_field("question") {
             Some(question) => tools.ask_local(question),
             None => Err(anyhow::anyhow!("ask_local needs a question")),
+        },
+        Some("summarize_file") => match text_field("path") {
+            Some(path) => tools.summarize_file(path),
+            None => Err(anyhow::anyhow!("summarize_file needs a path")),
+        },
+        Some("explain_log") => match text_field("log") {
+            Some(log) => tools.explain_log(log),
+            None => Err(anyhow::anyhow!("explain_log needs a log")),
         },
         other => Err(anyhow::anyhow!("no tool called {other:?}")),
     };
@@ -462,6 +543,53 @@ mod tests {
         fn ask_local(&self, _: &str) -> anyhow::Result<String> {
             anyhow::bail!("no model here")
         }
+
+        fn summarize_file(&self, path: &str) -> anyhow::Result<String> {
+            Ok(format!("summary of {path}"))
+        }
+
+        fn explain_log(&self, log: &str) -> anyhow::Result<String> {
+            Ok(format!("{} bytes", log.len()))
+        }
+    }
+
+    #[test]
+    fn the_smaller_jobs_are_offered_and_need_their_input() {
+        let tools = call(json!({ "id": 1, "method": "tools/list" }));
+        let names: Vec<&str> = tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            ["search_code", "summarize_file", "explain_log", "ask_local"]
+        );
+        let reply = call(json!({ "id": 2, "method": "tools/call", "params": {
+            "name": "summarize_file", "arguments": { "path": "a.rs" } } }));
+        assert_eq!(reply["result"]["content"][0]["text"], "summary of a.rs");
+        let missing = call(json!({ "id": 3, "method": "tools/call", "params": {
+            "name": "explain_log", "arguments": {} } }));
+        assert_eq!(missing["result"]["isError"], true);
+    }
+
+    #[test]
+    fn a_file_outside_the_repository_is_refused() {
+        let base = std::env::temp_dir().join(format!("ccc-inside-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("repo")).unwrap();
+        let base = fs::canonicalize(&base).unwrap();
+        let root = base.join("repo");
+        fs::write(root.join("kept.rs"), "x").unwrap();
+        fs::write(base.join("secret.env"), "x").unwrap();
+        std::os::unix::fs::symlink(base.join("secret.env"), root.join("link.env")).unwrap();
+
+        assert!(file_inside(&root, "kept.rs").is_ok());
+        for path in ["../secret.env", "link.env", "/etc/passwd", "missing.rs"] {
+            assert!(file_inside(&root, path).is_err(), "{path}");
+        }
+        fs::remove_dir_all(&base).unwrap();
     }
 
     fn call(message: Value) -> Value {
@@ -477,7 +605,7 @@ mod tests {
 
         let tools = call(json!({ "id": 2, "method": "tools/list" }));
         assert_eq!(tools["result"]["tools"][0]["name"], "search_code");
-        assert_eq!(tools["result"]["tools"][1]["name"], "ask_local");
+        assert_eq!(tools["result"]["tools"][3]["name"], "ask_local");
 
         assert_eq!(
             call(json!({ "id": 3, "method": "nope" }))["error"]["code"],

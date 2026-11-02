@@ -106,6 +106,34 @@ pub(crate) fn handle(
         return Ok(());
     }
 
+    match event {
+        "rules-prompt" => {
+            if let Some(context) = crate::rules::hook(state_dir, field("cwd"), field("prompt")) {
+                writeln!(std::io::stdout(), "{context}").context("writing rules")?;
+            }
+            return Ok(());
+        }
+        "sharpen-prompt" => {
+            let output = crate::sharpen::hook(
+                state_dir,
+                field("session_id"),
+                field("cwd"),
+                field("prompt"),
+            );
+            if let Some(output) = output {
+                writeln!(std::io::stdout(), "{output}").context("writing the suggestion")?;
+            }
+            return Ok(());
+        }
+        "trim-output" => {
+            if let Some(output) = crate::trim::hook(state_dir, &input) {
+                writeln!(std::io::stdout(), "{output}").context("writing trimmed output")?;
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+
     if event == "enhance-prompt" {
         if let Some(context) = crate::enhance::hook(state_dir, field("cwd"), field("prompt")) {
             writeln!(std::io::stdout(), "{context}").context("writing context")?;
@@ -173,6 +201,23 @@ fn index_in_background(state_dir: &Path, cwd: &str) {
         .spawn();
     if let Err(err) = spawned {
         tracing::warn!(error = %err, "could not start indexing");
+    }
+    // Rules need the larger model, which may still be downloading or may not be wanted.
+    let can_learn = config.answering.as_deref().is_some_and(|name| {
+        matches!(config.backend, crate::config::Backend::Server { .. })
+            || crate::config::LocalConfig::model_file(state_dir, name).exists()
+    });
+    if can_learn && let Ok(ccc) = std::env::current_exe() {
+        let spawned = Process::new(ccc)
+            .args(["rules", "learn", "--budget", "20", "--state-dir"])
+            .arg(state_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if let Err(err) = spawned {
+            tracing::warn!(error = %err, "could not start learning");
+        }
     }
 }
 

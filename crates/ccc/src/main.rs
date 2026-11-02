@@ -23,9 +23,12 @@ mod model_bench;
 mod names;
 mod policy;
 mod router;
+mod rules;
 mod run;
 mod setup;
+mod sharpen;
 mod statusline;
+mod trim;
 mod verify;
 mod whatif;
 
@@ -83,6 +86,10 @@ enum Command {
     Status(StateArgs),
     /// Show what the local model has kept out of Claude's context.
     Gain(StateArgs),
+    /// See and decide about what the local model learned from your sessions.
+    Rules(rules::RulesArgs),
+    /// See or change which optional jobs the local model does.
+    Jobs(sharpen::JobsArgs),
     /// List the other commands.
     Advanced,
     /// Print the status line. Called by Claude Code, not by hand.
@@ -742,6 +749,14 @@ async fn main() -> anyhow::Result<ExitCode> {
         }
         Command::Gain(args) => {
             gain::run(&args.dir()?)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Rules(args) => {
+            rules::run(&args, &claude_home()?)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Jobs(args) => {
+            sharpen::jobs(&args)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::FetchModel(args) => {

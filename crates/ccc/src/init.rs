@@ -14,12 +14,22 @@ use serde_json::{Map, Value, json};
 use crate::hooks::shell_quote;
 
 /// Marks a hook as ours, so it can be found again.
-const OUR_HOOKS: [&str; 2] = [" hook advise-", " hook enhance-"];
+const OUR_HOOKS: [&str; 5] = [
+    " hook advise-",
+    " hook enhance-",
+    " hook rules-",
+    " hook sharpen-",
+    " hook trim-",
+];
 const HOOK_TIMEOUT_SECONDS: u32 = 10;
-/// Claude Code event, and our handler for it.
-const EVENTS: [(&str, &str); 2] = [
-    ("SessionStart", "advise-session-start"),
-    ("UserPromptSubmit", "advise-prompt"),
+/// Claude Code event, our handler for it, and which tool it's for. Each does nothing unless its
+/// job is on, so they cost only a very short process.
+const EVENTS: [(&str, &str, Option<&str>); 5] = [
+    ("SessionStart", "advise-session-start", None),
+    ("UserPromptSubmit", "advise-prompt", None),
+    ("UserPromptSubmit", "rules-prompt", None),
+    ("UserPromptSubmit", "sharpen-prompt", None),
+    ("PostToolUse", "trim-output", Some("Bash")),
 ];
 
 #[derive(Debug, Args)]
@@ -62,7 +72,7 @@ fn remove_ours(settings: &mut Map<String, Value>) -> anyhow::Result<()> {
     let hooks = hooks
         .as_object_mut()
         .context("its \"hooks\" setting isn't an object")?;
-    for (event, _) in EVENTS {
+    for (event, ..) in EVENTS {
         let Some(entries) = hooks.get_mut(event).and_then(Value::as_array_mut) else {
             continue;
         };
@@ -88,8 +98,8 @@ fn add_ours(
         .or_insert_with(|| json!({}))
         .as_object_mut()
         .context("its \"hooks\" setting isn't an object")?;
-    let extra = enhance.then_some(("UserPromptSubmit", "enhance-prompt"));
-    for (event, handler) in EVENTS.into_iter().chain(extra) {
+    let extra = enhance.then_some(("UserPromptSubmit", "enhance-prompt", None));
+    for (event, handler, matcher) in EVENTS.into_iter().chain(extra) {
         let command = format!(
             "{} hook {handler} --state-dir {}",
             shell_quote(&ccc.to_string_lossy()),
@@ -100,11 +110,15 @@ fn add_ours(
             .or_insert_with(|| json!([]))
             .as_array_mut()
             .with_context(|| format!("its {event} hooks aren't a list"))?;
-        entries.push(json!({ "hooks": [{
+        let mut entry = json!({ "hooks": [{
             "type": "command",
             "command": command,
             "timeout": HOOK_TIMEOUT_SECONDS,
-        }] }));
+        }] });
+        if let Some(matcher) = matcher {
+            entry["matcher"] = json!(matcher);
+        }
+        entries.push(entry);
     }
     Ok(())
 }
@@ -126,7 +140,7 @@ pub(crate) fn remove_hooks(settings: &mut Map<String, Value>) -> anyhow::Result<
 
 /// Whether every hook is in place.
 pub(crate) fn hooks_installed(settings: &Map<String, Value>) -> bool {
-    EVENTS.iter().all(|(event, _)| {
+    EVENTS.iter().all(|(event, ..)| {
         settings
             .get("hooks")
             .and_then(|hooks| hooks.get(*event))
@@ -236,13 +250,13 @@ mod tests {
     #[test]
     fn adds_to_an_empty_file() {
         let settings = apply("", false);
-        for (event, handler) in EVENTS {
-            let command = settings["hooks"][event][0]["hooks"][0]["command"]
-                .as_str()
-                .unwrap();
-            assert!(command.starts_with("'/bin/my ccc' hook "), "{command}");
-            assert!(command.contains(handler), "{command}");
+        let all = settings["hooks"].to_string();
+        for (event, handler, _) in EVENTS {
+            assert!(settings["hooks"][event].is_array(), "{event}");
+            assert!(all.contains(handler), "{handler}");
         }
+        assert!(all.contains("/bin/my ccc' hook "), "{all}");
+        assert_eq!(settings["hooks"]["PostToolUse"][0]["matcher"], "Bash");
     }
 
     #[test]

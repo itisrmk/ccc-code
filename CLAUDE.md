@@ -55,6 +55,8 @@ Live scenarios (`scripts/live_test.py --list`):
 - `setup`: a clean install under a throwaway home reports healthy and leaves nothing behind
 - `status_line`: the real TUI shows our status line
 - `service_recovers`: killing the background service never hurts a prompt
+- `trim`: a long log reaches the model shorter through the hook, with its failure line kept
+- `rules`: a learned rule stays unused until approved, and a planted instruction is never learned
 - `init`: `ccc init` writes hooks that really warn, and removes them again, leaving other settings
 - `handoff`: a fresh session given only `ccc handoff` knows what the first session was told
 - `enhance`: the prompt hook adds files as context, leaves the person's words alone, and stays valid
@@ -67,6 +69,13 @@ Newest first. Record what was tested, what happened and any real finding. Number
 
 ### 2026-11-01
 
+- Final run on Phase 2: `scripts/check.sh` passed with 393 tests, and 29 of 30 live scenarios passed with Codex skipped, since it spends ChatGPT quota and no proxy code changed. Full pipeline 3, 14 and 47 ms at 1, 4 and 16 MB. Phase 3, other agents and launch, waits on the user.
+- Hiding commands behind `ccc advanced` silently turned three live scenarios into skips, since they looked for their features in `--help`, and a suite reporting all passed hid it. They now read `ccc advanced`. Read the skip list, not just the count.
+- Haiku sometimes skips thinking, seen once: `headless` and `enforcement` then fail because there's nothing to enforce. They passed 3 of 3 on rerun. Keep them strict, since a pass with no thinking block proves nothing.
+- Phase 2 of the product plan, tested on 7 real tasks from one of the author's Rust projects with `cargo` off the agent's `PATH`, one repetition. Haiku, $1.48: plain 7/7, learned rule 6/7, trim 5/7, rewrite 7/7. Sonnet, $2.76: plain 6/7, learned rule 5/7. No difference reached the bar, and none passed more tasks, so nothing is on by default. One trim run failed after a single turn at above-average cost, and why wasn't investigated. The default-on gate of 20 real tasks can't be met from the author's repositories so far.
+- Learned rules on real history: 178 prompts yielded nothing lasting. Asked directly, Gemma 4 E2B kept turning task requests into rules: 1 useful of 3, and few-shot examples made it worse at 15, nearly all noise. A narrow filter on lasting language plus a second yes-or-no question left 0. Commands that kept working were far better, with no model: 9 proposals, including `export PATH=/opt/homebrew/opt/rustup/bin:$PATH` seen 417 times and `scripts/check.sh`. Real command lines are chained, so a filter skipping chains had dropped 1,223 runs until it was changed to read the pieces.
+- `PostToolUse` `updatedToolOutput` works on Bash: 7,286 tokens trimmed live, failure kept, with no command rewriting, so permissions are untouched. The plan had assumed `PreToolUse`.
+- A commit went out with a failing test, because a script committed regardless of `check.sh`. The failure was real: a process starting at the wrong moment can inherit a dead service's socket, so connecting seemed to work and the next service refused to start. A service must now answer a ping. Commit steps now depend on the checks passing.
 - Phase 1 of the product plan: `ccc setup`, `uninstall`, `doctor`, `status`, `gain`, a status line, a background service, an Ollama and LM Studio backend, a plugin and `install.sh`. A clean install under a throwaway home took 28 s with the 2.8 GB model left downloading in the background, against 239 s waiting for it. Service memory 455 MB with embeddings loaded, 2,755 MB with Gemma too. A hook answered in 0.36 s with the service killed. The real TUI showed `week limit 35% · cache 1h0m · context 44K`, from a real session.
 - `ccc uninstall` restored settings exactly once a real comparison ruled out a false alarm: `claude mcp add` itself rewrites `"opus"` to `"opus[1m]"`.
 - A real redaction limit, seen once in 4 runs of `policy`: Haiku replied with a mangled placeholder, `<be6vzn1v-codename>`, built from the temporary path, which can't be turned back into the real value. The value stayed local, so it fails safe, but the person sees nonsense.

@@ -147,6 +147,12 @@ impl Detector {
 
     /// Finds secrets in `text`: non-overlapping byte ranges in order, each with the name
     /// of the rule that found it. Time is linear in the length of `text`.
+    /// Whether `text` holds anything that looks like a secret.
+    #[must_use]
+    pub fn finds_secret(&self, text: &str) -> bool {
+        !self.find(text).is_empty()
+    }
+
     pub(crate) fn find(&self, text: &str) -> Vec<(Range<usize>, &'static str)> {
         let mut found: Vec<(Range<usize>, &'static str)> = Vec::new();
         for index in self.prefilter.matches(text) {

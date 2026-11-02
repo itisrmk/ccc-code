@@ -4,7 +4,7 @@ Built to make your Claude limit last longer. A small model on your machine helps
 
 ![ccc whatif on a sample history](docs/demo.svg)
 
-**This is early, and it publishes what didn't work.** Restarting a large session cut real cost by 28% in testing, on synthetic tasks. Adding context to prompts never passed more real tasks than leaving it out, so it's off by default. Trimming output saved only 0.4% of cost. The [results](#results) have the details, and `ccc whatif` measures your own sessions.
+**This is early, and it publishes what didn't work.** Restarting a large session cut real cost by 28% in testing, on synthetic tasks. But so far nothing the local model does to prompts has passed more real tasks than leaving prompts alone, so those jobs are off by default. Trimming output saved only 0.4% of cost. The [results](#results) have the details, and `ccc whatif` measures your own sessions.
 
 ## Quick start
 
@@ -26,6 +26,8 @@ week limit 62% · cache 12m · context 340K · saved 18K today
 | `ccc whatif` | Shows where your Claude usage went, and what restarting would have changed |
 | `ccc ask "..."` | Answers questions about this code with a local model, free and offline |
 | `ccc handoff --start` | Continues this directory's last session in a fresh one |
+| `ccc rules` | Shows what it learned from your sessions, for you to approve or reject |
+| `ccc jobs` | Turns optional jobs on: sharpening vague prompts, rewriting, trimming output |
 | `ccc gain` | Shows what the local model kept out of Claude's context |
 | `ccc eval` | Tests whether a `CLAUDE.md`, skill or hook really helps, on your repository's history |
 | `ccc doctor` | Checks that everything's working |
@@ -102,6 +104,26 @@ Setup fetches EmbeddingGemma (under Google's Gemma terms) and Gemma 4 E2B (Apach
 `ccc ask` finds the closest code by meaning and has Gemma answer from it, naming what it looked at. Nothing leaves your machine. It took about 8 seconds on an M2 Pro, and it's a small model that can be wrong, so treat its answers as a starting point.
 
 To give Claude the same abilities, add `ccc mcp` as an MCP server. It offers `search_code`, for finding code when you don't know its name, and `ask_local`.
+
+### Teach it your project
+
+As sessions start, `ccc` reads your history in the background and proposes rules: unusual setup that keeps working, like `export PATH=/opt/homebrew/opt/rustup/bin:$PATH`, and lasting instructions you've given, like "we use pnpm, never npm". `ccc rules` shows each with its evidence. **Nothing is used until you approve it**, and then only rules that bear on the prompt are added, under a size cap.
+
+Only your own words and the agent's own commands are read. An instruction hidden in a file, web page or tool output can't become a rule, and nothing is written to your `CLAUDE.md`.
+
+Most of what comes from commands has been useful. Most of what comes from what people say hasn't: on one developer's 178 prompts, Gemma 4 E2B kept turning task requests into "rules", so only sentences with clear lasting language reach it, and a second question has to confirm the result. That left nothing to propose from that history. It may do better for people who state rules more often, and a bad proposal costs only a moment to reject.
+
+### Optional jobs
+
+These are off until they've shown they help on real work. `ccc jobs NAME MODE` changes one.
+
+| Job | Modes | What it does |
+|---|---|---|
+| `trim` | `on` | Shortens long command output before Claude sees it, keeping failures, and says what it dropped. Commands and permission checks aren't touched |
+| `sharpen` | `suggest` | Holds back a vague prompt like "fix the bug" once, with a sharper version from the local model. Sending it again goes ahead. Claude Code has no way to accept an edit, so you copy it. `/ccc-code:sharpen` does this on request |
+| `rewrite` | `on` | Adds the local model's clearer version of each prompt beside yours, since hooks can't replace a prompt. Adds a few seconds per prompt |
+
+Claude also gets four local tools: `search_code`, `summarize_file`, `explain_log` and `ask_local`. They're free, and they can be wrong, and their descriptions tell Claude so.
 
 ### Add context to prompts
 
@@ -268,6 +290,19 @@ Choosing the files, on 106 real prompts from 3 repositories (`ccc enrich-eval --
 | The same, then reordered by Qwen3-4B | 32.1% | 16.7% |
 
 Past sessions are the strongest signal. Embeddings beat keywords, so they help a repository with no history, but adding them to past sessions didn't help. Asking a model to reorder the files made things worse, though Gemma was faster than Qwen (0.64 s vs 1.19 s) and more accurate. So no model chooses files.
+
+### Do the local model's jobs help?
+
+Not yet shown. On the same 7 real tasks, with `cargo` taken off `PATH` so a learned rule had something to fix, one run each:
+
+| Job | Model | Passed, plain then with it | Cost | Turns |
+|---|---|---|---|---|
+| Learned rule | Haiku | 7 then 6 | $0.054 then $0.045 | 28.9 then 27.0 |
+| Learned rule | Sonnet | 6 then 5 | $0.206 then $0.189 | 14.3 then 12.4 |
+| Trimming | Haiku | 7 then 5 | $0.054 then $0.055 | 28.9 then 24.6 |
+| Rewriting | Haiku | 7 then 7 | $0.054 then $0.057 | 28.9 then 30.4 |
+
+None of these differences reached the bar, and 7 tasks can't show much. But none passed more tasks, so all stay off or need your approval. A job turns on by default only after at least 20 real tasks on both models, passing at least as many as plain, with lower cost or fewer turns.
 
 ### Can `ccc eval` tell setups apart?
 
