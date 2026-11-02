@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use ccc_index::{SemanticHit, SemanticIndex, query_text};
+use ccc_redact::Detector;
 use ccc_slm::{CompletionRequest, Embedder, TextModel};
 use clap::Args;
 use serde_json::{Value, json};
@@ -23,14 +24,19 @@ const EXCERPTS: usize = 6;
 /// As many lines as a chunk holds.
 const EXCERPT_LINES: usize = 40;
 const MAX_ANSWER_TOKENS: u32 = 512;
+const EXPLAIN_LOG: &str = "Say what went wrong in this log and quote the lines that show it \
+    exactly, in under 120 words. If nothing went wrong, say so.";
 /// A person may wait this long for a free answer, and no longer.
 const ANSWER_DEADLINE: Duration = Duration::from_secs(90);
 /// A person is waiting on a hook, so vectors arrive quickly or not at all.
 const VECTOR_PATIENCE: Duration = Duration::from_millis(800);
 const CHARS_PER_TOKEN: usize = 4;
-/// About as much as fits in the model's context with room for its answer.
-const MAX_DIGEST_CHARS: usize = 40_000;
+/// Fits the model's 16K context with room for its answer, even if every character were a token.
+/// Logs really are dense: 40,000 characters of one came to 18,318 tokens.
+const MAX_DIGEST_CHARS: usize = 15_000;
 const SEARCH_LIMIT: u64 = 5;
+/// Enough of a match to judge it, and often enough to skip opening the file.
+const HIT_LINES: usize = 8;
 const MAX_SEARCH_LIMIT: u64 = 20;
 /// The MCP version to offer a client that doesn't name one.
 const MCP_VERSION: &str = "2025-06-18";
@@ -94,11 +100,15 @@ fn search(
 }
 
 fn excerpt(root: &Path, hit: &SemanticHit) -> Option<String> {
+    lines_at(root, hit, EXCERPT_LINES)
+}
+
+fn lines_at(root: &Path, hit: &SemanticHit, count: usize) -> Option<String> {
     let source = fs::read_to_string(root.join(&hit.file)).ok()?;
     let body: Vec<&str> = source
         .lines()
         .skip(hit.start_line.saturating_sub(1))
-        .take(EXCERPT_LINES)
+        .take(count)
         .collect();
     Some(body.join("\n"))
 }
@@ -238,16 +248,13 @@ trait Tools {
     fn ask_local(&self, question: &str) -> anyhow::Result<String>;
     fn summarize_file(&self, path: &str) -> anyhow::Result<String>;
     fn explain_log(&self, log: &str) -> anyhow::Result<String>;
+    fn explain_log_file(&self, path: &str) -> anyhow::Result<String>;
 }
 
 impl Tools for Models {
     fn search_code(&self, query: &str, limit: usize) -> anyhow::Result<String> {
         let hits = search(self.index()?, &self.client, query, limit)?;
-        let mut text = String::new();
-        for hit in hits {
-            let _ = writeln!(text, "{}:{} ({:.2})", hit.file, hit.start_line, hit.score);
-        }
-        Ok(text)
+        Ok(format_hits(&self.root, &hits))
     }
 
     fn ask_local(&self, question: &str) -> anyhow::Result<String> {
@@ -268,23 +275,32 @@ impl Tools for Models {
         self.digest(
             "Summarize what this file does and name its main functions or types, in under 120 \
              words. Only state what the file shows.",
-            &text,
+            first_chars(&text),
         )
     }
 
     fn explain_log(&self, log: &str) -> anyhow::Result<String> {
-        self.digest(
-            "Say what went wrong in this log and quote the lines that show it exactly, in under \
-             120 words. If nothing went wrong, say so.",
-            log,
-        )
+        // Claude already paid for this text by writing it out, so nothing was saved.
+        self.complete(EXPLAIN_LOG, last_chars(log))
+    }
+
+    fn explain_log_file(&self, path: &str) -> anyhow::Result<String> {
+        let file = file_inside(&self.root, path)?;
+        let bytes = fs::read(&file).with_context(|| format!("reading {path}"))?;
+        self.digest(EXPLAIN_LOG, last_chars(&String::from_utf8_lossy(&bytes)))
     }
 }
 
 impl Models {
     /// Has the local model read `text` so Claude doesn't have to, and records the difference.
-    fn digest(&self, instruction: &str, text: &str) -> anyhow::Result<String> {
-        let shown: String = text.chars().take(MAX_DIGEST_CHARS).collect();
+    fn digest(&self, instruction: &str, shown: &str) -> anyhow::Result<String> {
+        let answer = self.complete(instruction, shown)?;
+        let saved = shown.len().saturating_sub(answer.len()) / CHARS_PER_TOKEN;
+        gain::record(&self.state_dir, gain::Basis::LocalAnswer, saved as u64);
+        Ok(answer)
+    }
+
+    fn complete(&self, instruction: &str, shown: &str) -> anyhow::Result<String> {
         let completion = self
             .client
             .complete(&CompletionRequest {
@@ -294,11 +310,42 @@ impl Models {
                 deadline: ANSWER_DEADLINE,
             })
             .context("asking the local model")?;
-        let answer = completion.text.trim().to_owned();
-        let saved = shown.len().saturating_sub(answer.len()) / CHARS_PER_TOKEN;
-        gain::record(&self.state_dir, gain::Basis::LocalAnswer, saved as u64);
-        Ok(answer)
+        Ok(completion.text.trim().to_owned())
     }
+}
+
+/// The start of `text`, where a file says what it is.
+fn first_chars(text: &str) -> &str {
+    let end = text
+        .char_indices()
+        .nth(MAX_DIGEST_CHARS)
+        .map_or(text.len(), |(at, _)| at);
+    &text[..end]
+}
+
+/// The end of `text`, since a log's failure is usually its last thing.
+fn last_chars(text: &str) -> &str {
+    let start = text
+        .char_indices()
+        .rev()
+        .nth(MAX_DIGEST_CHARS.saturating_sub(1))
+        .map_or(0, |(at, _)| at);
+    &text[start..]
+}
+
+/// Search results with their code. A match holding a secret shows only its location.
+fn format_hits(root: &Path, hits: &[SemanticHit]) -> String {
+    let detector = Detector::builtin();
+    let mut text = String::new();
+    for hit in hits {
+        let _ = writeln!(text, "{}:{} ({:.2})", hit.file, hit.start_line, hit.score);
+        if let Some(body) =
+            lines_at(root, hit, HIT_LINES).filter(|body| !detector.finds_secret(body))
+        {
+            let _ = writeln!(text, "{body}\n");
+        }
+    }
+    text
 }
 
 /// `path` as a file inside `root`. Anything that leads outside is refused, since a model can be
@@ -335,7 +382,7 @@ fn tool_list() -> Value {
         {
             "name": "search_code",
             "description": "Find code in this repository by meaning, for when you don't know \
-                what it's called. Returns file:line locations. Runs locally. Use Grep instead \
+                what it's called. Returns file:line locations with the code there. Runs locally. Use Grep instead \
                 when you know the exact name.",
             "inputSchema": {
                 "type": "object",
@@ -359,12 +406,15 @@ fn tool_list() -> Value {
         },
         {
             "name": "explain_log",
-            "description": "Have a small local model pick out what went wrong in long log output. \
-                Free and private, but it can miss things, so check what it quotes.",
+            "description": "Have a small local model pick out what went wrong in a long log. \
+                Free and private, but it can miss things, so check what it quotes. Give a path \
+                when the log is in a file, so you don't have to write it out.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "log": { "type": "string" } },
-                "required": ["log"],
+                "properties": {
+                    "path": { "type": "string", "description": "Log file, relative to the repository" },
+                    "log": { "type": "string", "description": "The log's text, if it isn't in a file" },
+                },
             },
         },
         {
@@ -407,9 +457,10 @@ fn call_tool(tools: &dyn Tools, params: &Value) -> Value {
             Some(path) => tools.summarize_file(path),
             None => Err(anyhow::anyhow!("summarize_file needs a path")),
         },
-        Some("explain_log") => match text_field("log") {
-            Some(log) => tools.explain_log(log),
-            None => Err(anyhow::anyhow!("explain_log needs a log")),
+        Some("explain_log") => match (text_field("path"), text_field("log")) {
+            (Some(path), _) => tools.explain_log_file(path),
+            (None, Some(log)) => tools.explain_log(log),
+            (None, None) => Err(anyhow::anyhow!("explain_log needs a path or a log")),
         },
         other => Err(anyhow::anyhow!("no tool called {other:?}")),
     };
@@ -551,6 +602,10 @@ mod tests {
         fn explain_log(&self, log: &str) -> anyhow::Result<String> {
             Ok(format!("{} bytes", log.len()))
         }
+
+        fn explain_log_file(&self, path: &str) -> anyhow::Result<String> {
+            Ok(format!("log at {path}"))
+        }
     }
 
     #[test]
@@ -572,6 +627,47 @@ mod tests {
         let missing = call(json!({ "id": 3, "method": "tools/call", "params": {
             "name": "explain_log", "arguments": {} } }));
         assert_eq!(missing["result"]["isError"], true);
+        let by_path = call(json!({ "id": 4, "method": "tools/call", "params": {
+            "name": "explain_log", "arguments": { "path": "b.log", "log": "x" } } }));
+        assert_eq!(by_path["result"]["content"][0]["text"], "log at b.log");
+        let by_text = call(json!({ "id": 5, "method": "tools/call", "params": {
+            "name": "explain_log", "arguments": { "log": "abc" } } }));
+        assert_eq!(by_text["result"]["content"][0]["text"], "3 bytes");
+    }
+
+    #[test]
+    fn a_long_log_keeps_its_end_and_a_long_file_its_start() {
+        let text = format!("start{}end é", "x".repeat(MAX_DIGEST_CHARS));
+        assert!(last_chars(&text).ends_with("end é"));
+        assert_eq!(last_chars(&text).chars().count(), MAX_DIGEST_CHARS);
+        assert!(first_chars(&text).starts_with("start"));
+        assert_eq!(first_chars(&text).chars().count(), MAX_DIGEST_CHARS);
+        assert_eq!(last_chars("short"), "short");
+        assert_eq!(first_chars("short"), "short");
+    }
+
+    #[test]
+    fn search_results_show_code_but_never_a_secret() {
+        let root = std::env::temp_dir().join(format!("ccc-hits-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("a.py"), "skipped\ndef refund():\n    pass\n").unwrap();
+        let key = format!("sk-ant-api03-{}", "a1B2c3D4e5F6".repeat(6));
+        fs::write(root.join("b.py"), format!("KEY = \"{key}\"\n")).unwrap();
+        let hit = |file: &str, start_line| SemanticHit {
+            file: file.to_owned(),
+            start_line,
+            score: 0.5,
+        };
+
+        let text = format_hits(&root, &[hit("a.py", 2), hit("b.py", 1), hit("gone.py", 1)]);
+
+        fs::remove_dir_all(&root).unwrap();
+        assert!(text.contains("a.py:2 (0.50)\ndef refund():"), "{text}");
+        assert!(!text.contains("skipped"), "{text}");
+        assert!(text.contains("b.py:1 (0.50)"), "{text}");
+        assert!(!text.contains("sk-ant"), "{text}");
+        assert!(text.contains("gone.py:1 (0.50)"), "{text}");
     }
 
     #[test]
