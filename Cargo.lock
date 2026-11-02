@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "ccc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -292,7 +292,7 @@ dependencies = [
 
 [[package]]
 name = "ccc-bench"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ccc-ledger",
  "ccc-wire",
@@ -304,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "ccc-enrich"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ccc-index",
  "ccc-learn",
@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "ccc-eval"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -326,7 +326,7 @@ dependencies = [
 
 [[package]]
 name = "ccc-index"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ignore",
  "serde_json",
@@ -342,7 +342,7 @@ dependencies = [
 
 [[package]]
 name = "ccc-learn"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ccc-index",
  "regex",
@@ -354,7 +354,7 @@ dependencies = [
 
 [[package]]
 name = "ccc-ledger"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rusqlite",
  "serde_json",
@@ -363,7 +363,7 @@ dependencies = [
 
 [[package]]
 name = "ccc-ner"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ndarray",
  "ort",
@@ -374,7 +374,7 @@ dependencies = [
 
 [[package]]
 name = "ccc-pipeline"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ccc-wire",
  "serde_json",
@@ -385,7 +385,7 @@ dependencies = [
 
 [[package]]
 name = "ccc-proxy"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "bytes",
@@ -406,7 +406,7 @@ dependencies = [
 
 [[package]]
 name = "ccc-prune"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ccc-pipeline",
  "ccc-wire",
@@ -416,7 +416,7 @@ dependencies = [
 
 [[package]]
 name = "ccc-redact"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ccc-pipeline",
  "ccc-wire",
@@ -430,7 +430,7 @@ dependencies = [
 
 [[package]]
 name = "ccc-route"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ccc-pipeline",
  "ccc-wire",
@@ -439,7 +439,7 @@ dependencies = [
 
 [[package]]
 name = "ccc-slm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ccc-pipeline",
  "ccc-wire",
@@ -452,7 +452,7 @@ dependencies = [
 
 [[package]]
 name = "ccc-verify"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "bytes",
@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "ccc-wire"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",

@@ -3,7 +3,7 @@
 class Ccc < Formula
   desc "See what Claude Code really costs, and test what helps"
   homepage "https://github.com/itisrmk/ccc-code"
-  url "https://github.com/itisrmk/ccc-code/archive/refs/tags/v0.1.0.tar.gz"
+  url "https://github.com/itisrmk/ccc-code/archive/refs/tags/v0.1.1.tar.gz"
   sha256 "REPLACE_WITH_RELEASE_SHA256"
   license "MIT"
   head "https://github.com/itisrmk/ccc-code.git", branch: "main"
